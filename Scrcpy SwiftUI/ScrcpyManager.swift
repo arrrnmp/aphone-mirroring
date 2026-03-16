@@ -32,7 +32,16 @@ final class ScrcpyManager: ObservableObject {
     let videoStream = ScrcpyVideoStream()
     let controlSocket = ScrcpyControlSocket()
 
-    private let adbPath = "/opt/homebrew/bin/adb"
+    private let adbPath: String = {
+        let candidates = [
+            "/opt/homebrew/bin/adb",
+            "/usr/local/bin/adb",
+            "\(NSHomeDirectory())/Library/Android/sdk/platform-tools/adb",
+            "/Users/\(NSUserName())/Library/Android/sdk/platform-tools/adb"
+        ]
+        return candidates.first { FileManager.default.fileExists(atPath: $0) }
+            ?? "/opt/homebrew/bin/adb"  // fallback, will fail with a clear error
+    }()
 
     private var serverJarURL: URL? {
         let url = Bundle.main.url(forResource: "scrcpy-server", withExtension: nil)
@@ -73,15 +82,24 @@ final class ScrcpyManager: ObservableObject {
         availableDevices = parsed
         log("Parsed devices: \(parsed.isEmpty ? "(none)" : parsed.joined(separator: ", "))",
             level: parsed.isEmpty ? .warn : .ok)
-        if let connected = connectedDevice, !parsed.contains(connected) {
-            log("Connected device \(connected) disappeared — disconnecting", level: .warn)
-            await disconnect()
+        // Disconnect only if the connected serial is no longer in the adb device list
+        if let serial = connectedSerial {
+            let serials = parsed.compactMap { extractSerial(from: $0) }
+            if !serials.contains(serial) {
+                log("Connected device \(serial) disappeared — disconnecting", level: .warn)
+                await disconnect()
+            }
         }
     }
 
     private func parseADBDevices(_ output: String) -> [String] {
         output.components(separatedBy: "\n")
-            .filter { $0.contains("\tdevice") }
+            .filter { line in
+                // Match lines where the state field is exactly "device"
+                // adb devices -l uses spaces (not tabs) between serial and state
+                let parts = line.split(separator: " ", omittingEmptySubsequences: true)
+                return parts.count >= 2 && parts[1] == "device"
+            }
             .compactMap { line -> String? in
                 let parts = line.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
                 guard let serial = parts.first else { return nil }
@@ -192,7 +210,7 @@ final class ScrcpyManager: ObservableObject {
                 "/",
                 "com.genymobile.scrcpy.Server",
                 "3.3.4",
-                "scid=\(self.scid)",
+                "scid=\(String(self.scid, radix: 16))",
                 "log_level=info",
                 "video_codec=h264",
                 "audio=false",
@@ -200,7 +218,8 @@ final class ScrcpyManager: ObservableObject {
                 "tunnel_forward=false",
                 "max_size=0",
                 "stay_awake=true",
-                "turn_screen_off=true",
+                "power_on=false",
+                "screen_off_timeout=0",
                 "send_device_meta=true",
                 "send_frame_meta=true",
                 "send_dummy_byte=false",
@@ -251,6 +270,7 @@ final class ScrcpyManager: ObservableObject {
         await controlSocket.start(connection: controlConn, videoWidth: videoWidth, videoHeight: videoHeight)
 
         connectedDevice = deviceName
+        connectedSerial = serial
         state = .connected
         log("──── Connected to \(deviceName) \(videoWidth)×\(videoHeight) ────", level: .ok)
     }
@@ -277,10 +297,11 @@ final class ScrcpyManager: ObservableObject {
                 }
                 let lstate = ListenerState()
 
+                let netQueue = DispatchQueue(label: "scrcpy.listener", qos: .userInitiated)
                 listener.newConnectionHandler = { conn in
                     let idx = lstate.connections.count
-                    log("TCP connection #\(idx + 1) accepted from \(conn.endpoint)", level: .ok)
-                    conn.start(queue: .main)
+                    Task { @MainActor in log("TCP connection #\(idx + 1) accepted from \(conn.endpoint)", level: .ok) }
+                    conn.start(queue: netQueue)
                     lstate.connections.append(conn)
                     if lstate.connections.count == 2 && !lstate.resumed {
                         lstate.resumed = true
@@ -291,18 +312,18 @@ final class ScrcpyManager: ObservableObject {
                 listener.stateUpdateHandler = { newState in
                     switch newState {
                     case .ready:
-                        log("TCP listener ready on port \(port)", level: .ok)
+                        Task { @MainActor in log("TCP listener ready on port \(port)", level: .ok) }
                     case .failed(let err):
-                        log("TCP listener failed: \(err)", level: .error)
+                        Task { @MainActor in log("TCP listener failed: \(err)", level: .error) }
                         if !lstate.resumed {
                             lstate.resumed = true
                             continuation.resume(throwing: err)
                         }
                     default:
-                        log("TCP listener state: \(newState)", level: .debug)
+                        Task { @MainActor in log("TCP listener state: \(newState)", level: .debug) }
                     }
                 }
-                listener.start(queue: .main)
+                listener.start(queue: netQueue)
             } catch {
                 log("Failed to create listener: \(error)", level: .error)
                 continuation.resume(throwing: error)
@@ -324,6 +345,7 @@ final class ScrcpyManager: ObservableObject {
         serverProcess = nil
         state = .disconnected
         connectedDevice = nil
+        connectedSerial = nil
         log("Disconnected.", level: .ok)
     }
 
@@ -331,23 +353,27 @@ final class ScrcpyManager: ObservableObject {
 
     @discardableResult
     func adb(_ args: [String]) async -> String {
-        await withCheckedContinuation { continuation in
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: adbPath)
-            process.arguments = args
-            let pipe = Pipe()
-            let errPipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = errPipe
-            do {
-                try process.run()
-                process.waitUntilExit()
-                let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                continuation.resume(returning: out + err)
-            } catch {
-                log("adb exec error: \(error)", level: .error)
-                continuation.resume(returning: error.localizedDescription)
+        let path = adbPath
+        return await withCheckedContinuation { continuation in
+            // Run on a background thread so waitUntilExit() never blocks the main actor
+            DispatchQueue.global(qos: .userInitiated).async {
+                let process = Process()
+                process.executableURL = URL(fileURLWithPath: path)
+                process.arguments = args
+                let pipe = Pipe()
+                let errPipe = Pipe()
+                process.standardOutput = pipe
+                process.standardError = errPipe
+                do {
+                    try process.run()
+                    process.waitUntilExit()
+                    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                    continuation.resume(returning: out + err)
+                } catch {
+                    Task { @MainActor in log("adb exec error: \(error)", level: .error) }
+                    continuation.resume(returning: error.localizedDescription)
+                }
             }
         }
     }

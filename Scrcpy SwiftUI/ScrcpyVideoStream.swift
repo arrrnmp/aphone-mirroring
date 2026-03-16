@@ -34,25 +34,7 @@ final class ScrcpyVideoStream: ObservableObject {
     init() {
         displayLayer.videoGravity = .resizeAspect
         displayLayer.backgroundColor = CGColor.clear
-        setupTimebase()
         log("ScrcpyVideoStream init, displayLayer=\(displayLayer)", level: .debug)
-    }
-
-    private func setupTimebase() {
-        var timebase: CMTimebase?
-        let status = CMTimebaseCreateWithSourceClock(
-            allocator: kCFAllocatorDefault,
-            sourceClock: CMClockGetHostTimeClock(),
-            timebaseOut: &timebase
-        )
-        guard status == noErr, let tb = timebase else {
-            log("setupTimebase FAILED: \(status)", level: .error)
-            return
-        }
-        CMTimebaseSetTime(tb, time: .zero)
-        CMTimebaseSetRate(tb, rate: 1.0)
-        displayLayer.controlTimebase = tb
-        log("Timebase set up OK", level: .debug)
     }
 
     // MARK: - Start / Stop
@@ -255,28 +237,23 @@ final class ScrcpyVideoStream: ObservableObject {
             return
         }
 
-        // Display immediately — don't wait for PTS scheduling
-        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true) as? [[CFString: Any]],
-           !attachments.isEmpty {
-            // attachments array is mutable; set directly via CF
-        }
-        CMSetAttachment(sb, key: kCMSampleAttachmentKey_DisplayImmediately,
-                        value: kCFBooleanTrue,
-                        attachmentMode: kCMAttachmentMode_ShouldPropagate)
-
-        if displayLayer.sampleBufferRenderer.isReadyForMoreMediaData {
-            displayLayer.sampleBufferRenderer.enqueue(sb)
-            enqueuedFrameCount += 1
-        } else {
-            log("Renderer not ready at frame #\(dataPacketCount) — flushing", level: .warn)
-            displayLayer.flush()
-            displayLayer.sampleBufferRenderer.enqueue(sb)
-            enqueuedFrameCount += 1
+        // Display immediately — bypass PTS scheduling entirely
+        if let attachments = CMSampleBufferGetSampleAttachmentsArray(sb, createIfNecessary: true) {
+            let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+            CFDictionarySetValue(dict,
+                                 Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                                 Unmanaged.passUnretained(kCFBooleanTrue).toOpaque())
         }
 
-        // Check for renderer error
+        // Enqueue unconditionally — AVSampleBufferDisplayLayer manages its own internal queue.
+        // Checking isReadyForMoreMediaData and flushing on "not ready" destroys the decode
+        // pipeline on every frame and causes single-digit framerate.
+        displayLayer.sampleBufferRenderer.enqueue(sb)
+        enqueuedFrameCount += 1
+
+        // Only flush on an actual renderer error
         if let err = displayLayer.error {
-            log("displayLayer.error: \(err)", level: .error)
+            log("displayLayer.error: \(err) — flushing", level: .error)
             displayLayer.flush()
         }
     }

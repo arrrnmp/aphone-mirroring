@@ -8,6 +8,7 @@
 
 import Foundation
 import Combine
+import SwiftUI
 
 enum LogLevel: String {
     case info  = "ℹ"
@@ -15,6 +16,18 @@ enum LogLevel: String {
     case warn  = "⚠"
     case error = "✗"
     case debug = "·"
+
+    var icon: String { rawValue }
+
+    var color: Color {
+        switch self {
+        case .info:  return .white.opacity(0.75)
+        case .ok:    return .green
+        case .warn:  return .yellow
+        case .error: return .red
+        case .debug: return .white.opacity(0.45)
+        }
+    }
 }
 
 struct LogEntry: Identifiable {
@@ -23,10 +36,9 @@ struct LogEntry: Identifiable {
     let level: LogLevel
     let message: String
 
-    var formatted: String {
-        let t = DateFormatter.logTime.string(from: date)
-        return "\(t) \(level.rawValue) \(message)"
-    }
+    var timestamp: String { DateFormatter.logTime.string(from: date) }
+
+    var formatted: String { "\(timestamp) \(level.rawValue) \(message)" }
 }
 
 @MainActor
