@@ -56,6 +56,13 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: manager.state)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showLogPanel)
         .task { await manager.refreshDevices() }
+        .onChange(of: manager.state) { _, newState in
+            if newState == .connected {
+                windowManager.showControlPanel(controlSocket: manager.controlSocket)
+            } else {
+                windowManager.hideControlPanel()
+            }
+        }
         .onChange(of: manager.videoStream.videoSize) { _, size in
             manager.controlSocket.updateVideoSize(
                 width: Int(size.width),
@@ -90,28 +97,21 @@ struct ContentView: View {
     // MARK: - Control bar (toolbar row, lives above the phone in the VStack)
 
     private var controlBarContent: some View {
-        VStack(spacing: 6) {
-            // ── Row 1: traffic-light clearance + device label ─────────────────
-            HStack(spacing: 0) {
-                Color.clear.frame(width: 76)
-                deviceLabel
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-                    .foregroundStyle(.primary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-            }
+        HStack(spacing: 0) {
+            // ── Traffic-light clearance ───────────────────────────────────────
+            Color.clear.frame(width: 76)
 
-            // ── Row 2: buttons — centered, never wider than available space ───
-            GlassEffectContainer(spacing: 8) {
-                HStack(spacing: 8) {
-                    androidButtons
-                    utilityButtons
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
+            // ── Device label — centered ───────────────────────────────────────
+            deviceLabel
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            // ── Utility buttons ───────────────────────────────────────────────
+            utilityButtons
+                .padding(.trailing, 12)
         }
-        .padding(.top, 8)
-        .padding(.bottom, 10)
         .frame(height: controlBarHeight)
         .frame(maxWidth: .infinity)
         .preferredColorScheme(.dark)
@@ -147,23 +147,6 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private var androidButtons: some View {
-        if manager.state == .connected {
-            HStack(spacing: 2) {
-                barButton("arrow.left",        help: "Back")        { manager.controlSocket.sendBackButton() }
-                barButton("house",             help: "Home")        { manager.controlSocket.sendHomeButton() }
-                barButton("square.stack",      help: "Recents")     { manager.controlSocket.sendAppSwitch() }
-                barButton("speaker.minus",     help: "Volume Down") { manager.controlSocket.sendVolumeDown() }
-                barButton("speaker.plus",      help: "Volume Up")   { manager.controlSocket.sendVolumeUp() }
-                barButton("power",             help: "Power")       { manager.controlSocket.sendPowerButton() }
-            }
-            .glassEffect(.regular.interactive(), in: Capsule())
-            .glassEffectID("android", in: glassNS)
-            .transition(.scale(scale: 0.85).combined(with: .opacity))
-        }
-    }
-
-    @ViewBuilder
     private var utilityButtons: some View {
         HStack(spacing: 2) {
             if manager.state != .connected && !manager.availableDevices.isEmpty {
@@ -177,8 +160,6 @@ struct ContentView: View {
                 windowManager.toggleAlwaysOnTop()
             }
             if manager.state == .connected {
-                barButton("rotate.right", help: "Rotate") { manager.controlSocket.sendRotateDevice() }
-                    .transition(.scale(scale: 0.85).combined(with: .opacity))
                 barButton("stop.circle.fill", help: "Disconnect", tint: .red) {
                     Task { await manager.disconnect() }
                 }

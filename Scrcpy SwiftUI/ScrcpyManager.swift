@@ -34,7 +34,8 @@ final class ScrcpyManager: ObservableObject {
     private var batteryPollTask: Task<Void, Never>?
     private var statusItem: NSStatusItem?
 
-    let videoStream = ScrcpyVideoStream()
+    let videoStream   = ScrcpyVideoStream()
+    let audioStream   = ScrcpyAudioStream()
     let controlSocket = ScrcpyControlSocket()
 
     private let adbPath: String = {
@@ -56,6 +57,7 @@ final class ScrcpyManager: ObservableObject {
     }
 
     private var serverProcess: Process?
+    private var serverTask: Task<Void, Never>?   // untracked adb shell that runs the server
     private var tcpListener: NWListener?
     private var devicePollTask: Task<Void, Never>?
     private var connectTask: Task<Void, Never>?
@@ -171,6 +173,10 @@ final class ScrcpyManager: ObservableObject {
         let socketName = "scrcpy_\(scidHex)"
         log("Step 4: SCID=\(scid) socketName=\(socketName)", level: .debug)
 
+        // Step 4b: Detect display refresh rate to pass as max_fps
+        log("Step 4b: Detecting display refresh rate…")
+        let maxFps = await detectRefreshRate(serialArgs: serialArgs)
+
         // Step 5: Clean up any stale tunnel
         log("Step 5: Removing stale reverse tunnel (if any)…")
         let removeResult = await adb(serialArgs + ["reverse", "--remove", "localabstract:\(socketName)"])
@@ -179,12 +185,13 @@ final class ScrcpyManager: ObservableObject {
         // Step 6: Start our TCP listener FIRST
         log("Step 6: Starting TCP listener on port \(listenPort)…")
 
-        let (videoConn, controlConn): (NWConnection, NWConnection) = try await withThrowingTaskGroup(
-            of: (NWConnection, NWConnection)?.self
+        let conns: [NWConnection] = try await withThrowingTaskGroup(
+            of: [NWConnection]?.self
         ) { group in
 
             group.addTask {
-                try await self.listenForConnections(port: self.listenPort)
+                // video + audio + control = 3 connections
+                try await self.listenForConnections(port: self.listenPort, count: 3)
             }
 
             // Give the listener a moment to bind
@@ -218,25 +225,27 @@ final class ScrcpyManager: ObservableObject {
                 "scid=\(String(self.scid, radix: 16))",
                 "log_level=info",
                 "video_codec=h264",
-                "audio=false",
+                "audio=true",
+                "audio_codec=raw",
                 "control=true",
                 "tunnel_forward=false",
                 "max_size=0",
-                "stay_awake=true",
+                "stay_awake=false",
                 "power_on=false",
                 "screen_off_timeout=0",
                 "send_device_meta=true",
                 "send_frame_meta=true",
                 "send_dummy_byte=false",
                 "send_codec_meta=true",
-                "max_fps=90",
+                "max_fps=\(maxFps)",
                 "video_bit_rate=8000000",
                 "clipboard_autosync=true",
             ]
             log("Server args: \(serverArgs.joined(separator: " "))", level: .debug)
 
-            // Run adb shell in the background — it blocks until server exits
-            Task {
+            // Run adb shell in the background — it blocks until server exits.
+            // Stored so disconnect() can cancel it, which terminates the process.
+            self.serverTask = Task {
                 let shellResult = await self.adb(serverArgs)
                 log("scrcpy-server exited: \(shellResult.trimmingCharacters(in: .whitespacesAndNewlines))",
                     level: .warn)
@@ -246,16 +255,20 @@ final class ScrcpyManager: ObservableObject {
             return try await group.next()!!
         }
 
-        log("Step 9: Got 2 connections from device ✓", level: .ok)
+        log("Step 9: Got 3 connections from device ✓", level: .ok)
 
-        // Step 9: Read handshake — 64-byte device name
+        let videoConn   = conns[0]
+        let audioConn   = conns[1]
+        let controlConn = conns[2]
+
+        // Step 9: Read handshake — 64-byte device name (video connection only)
         log("Step 9: Reading device name handshake (64 bytes)…")
         let nameData = try await videoConn.receiveExactly(64)
         let deviceName = String(bytes: nameData.prefix(while: { $0 != 0 }), encoding: .utf8) ?? "Android Device"
         log("Device name: \(deviceName)", level: .ok)
 
-        // Step 10: Read codec metadata
-        log("Step 10: Reading codec metadata (12 bytes)…")
+        // Step 10: Read video codec metadata
+        log("Step 10: Reading video codec metadata (12 bytes)…")
         let codecData = try await videoConn.receiveExactly(12)
         let codecID     = codecData.loadBigEndianUInt32(at: 0)
         let videoWidth  = Int(codecData.loadBigEndianUInt32(at: 4))
@@ -270,13 +283,15 @@ final class ScrcpyManager: ObservableObject {
             throw ScrcpyError.unsupportedCodec(codecID)
         }
 
-        // Step 11: Hand off
-        log("Step 11: Handing off to video stream and control socket…")
+        // Step 11: Hand off — audio stream reads its own 12-byte metadata internally
+        log("Step 11: Handing off to video / audio / control…")
         await videoStream.start(connection: videoConn, width: videoWidth, height: videoHeight)
+        await audioStream.start(connection: audioConn)
         await controlSocket.start(connection: controlConn, videoWidth: videoWidth, videoHeight: videoHeight)
-        // Wire up disconnect detection: if either connection drops unexpectedly,
+        // Wire up disconnect detection: if any connection drops unexpectedly,
         // transition to the error state so the user sees the error screen.
-        videoStream.onDisconnect = { [weak self] in self?.handleUnexpectedDisconnect() }
+        videoStream.onDisconnect   = { [weak self] in self?.handleUnexpectedDisconnect() }
+        audioStream.onDisconnect   = { [weak self] in self?.handleUnexpectedDisconnect() }
         controlSocket.onDisconnect = { [weak self] in self?.handleUnexpectedDisconnect() }
 
         connectedDevice = deviceName
@@ -289,7 +304,7 @@ final class ScrcpyManager: ObservableObject {
 
     // MARK: - TCP Listener
 
-    private func listenForConnections(port: UInt16) async throws -> (NWConnection, NWConnection) {
+    private func listenForConnections(port: UInt16, count: Int) async throws -> [NWConnection] {
         return try await withCheckedThrowingContinuation { continuation in
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
@@ -315,9 +330,9 @@ final class ScrcpyManager: ObservableObject {
                     Task { @MainActor in log("TCP connection #\(idx + 1) accepted from \(conn.endpoint)", level: .ok) }
                     conn.start(queue: netQueue)
                     lstate.connections.append(conn)
-                    if lstate.connections.count == 2 && !lstate.resumed {
+                    if lstate.connections.count == count && !lstate.resumed {
                         lstate.resumed = true
-                        continuation.resume(returning: (lstate.connections[0], lstate.connections[1]))
+                        continuation.resume(returning: lstate.connections)
                         listener.cancel()
                     }
                 }
@@ -359,16 +374,20 @@ final class ScrcpyManager: ObservableObject {
 
     func disconnect() async {
         log("Disconnecting…")
-        videoStream.onDisconnect = nil
+        videoStream.onDisconnect   = nil
+        audioStream.onDisconnect   = nil
         controlSocket.onDisconnect = nil
         batteryPollTask?.cancel()
         batteryPollTask = nil
         removeStatusBar()
         connectTask?.cancel()
         connectTask = nil
+        serverTask?.cancel()   // cancellation triggers process.terminate() via withTaskCancellationHandler
+        serverTask = nil
         tcpListener?.cancel()
         tcpListener = nil
         await videoStream.stop()
+        await audioStream.stop()
         await controlSocket.stop()
         serverProcess?.terminate()
         serverProcess = nil
@@ -554,32 +573,81 @@ final class ScrcpyManager: ObservableObject {
         }
     }
 
+    // MARK: - Refresh rate detection
+
+    /// Queries the device's display refresh rate via `dumpsys display`.
+    /// Falls back to 60 if it can't be determined.
+    private func detectRefreshRate(serialArgs: [String]) async -> Int {
+        // Run grep on the device side so we receive only one line instead of the full
+        // dumpsys display output (hundreds of KB). Reading the full output causes a
+        // pipe-buffer deadlock: the device blocks writing while we wait for exit.
+
+        // Prefer mSupportedRefreshRates=[90.0, …] — first value is the device's peak rate.
+        let supported = await adb(serialArgs + ["shell",
+            "dumpsys display | grep -m1 mSupportedRefreshRates"])
+        if let bracketRange = supported.range(of: "mSupportedRefreshRates=[") {
+            let tail = supported[bracketRange.upperBound...]
+            let firstNum = tail.prefix(while: { $0.isNumber || $0 == "." })
+            if let fps = Double(firstNum), fps > 0, fps <= 360 {
+                let rate = Int(fps.rounded())
+                log("Display peak refresh rate: \(rate) Hz", level: .ok)
+                return rate
+            }
+        }
+
+        // Fallback: current active refresh rate.
+        let active = await adb(serialArgs + ["shell",
+            "dumpsys display | grep -m1 mRefreshRate"])
+        if let range = active.range(of: "mRefreshRate=") {
+            let tail = active[range.upperBound...]
+            let numStr = tail.prefix(while: { $0.isNumber || $0 == "." })
+            if let fps = Double(numStr), fps > 0, fps <= 360 {
+                let rate = Int(fps.rounded())
+                log("Display refresh rate (active): \(rate) Hz", level: .ok)
+                return rate
+            }
+        }
+
+        log("Could not detect refresh rate — defaulting to 60 Hz", level: .warn)
+        return 60
+    }
+
     // MARK: - ADB helper
 
     @discardableResult
     func adb(_ args: [String]) async -> String {
         let path = adbPath
-        return await withCheckedContinuation { continuation in
-            // Run on a background thread so waitUntilExit() never blocks the main actor
-            DispatchQueue.global(qos: .userInitiated).async {
-                let process = Process()
-                process.executableURL = URL(fileURLWithPath: path)
-                process.arguments = args
-                let pipe = Pipe()
-                let errPipe = Pipe()
-                process.standardOutput = pipe
-                process.standardError = errPipe
-                do {
-                    try process.run()
-                    process.waitUntilExit()
-                    let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                    continuation.resume(returning: out + err)
-                } catch {
-                    Task { @MainActor in log("adb exec error: \(error)", level: .error) }
-                    continuation.resume(returning: error.localizedDescription)
+        // Create Process here so the cancellation handler can reach it
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = args
+        let pipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = errPipe
+
+        // withTaskCancellationHandler ensures that if the Swift Task is cancelled
+        // (e.g. on disconnect or app quit), process.terminate() is called immediately,
+        // unblocking waitUntilExit() on the background thread and avoiding EXC_BAD_ACCESS.
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        try process.run()
+                        process.waitUntilExit()
+                        let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                        let err = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+                        continuation.resume(returning: out + err)
+                    } catch {
+                        Task { @MainActor in log("adb exec error: \(error)", level: .error) }
+                        continuation.resume(returning: error.localizedDescription)
+                    }
                 }
             }
+        } onCancel: {
+            // Called on an arbitrary thread when the task is cancelled;
+            // terminate() is thread-safe on Process.
+            process.terminate()
         }
     }
 

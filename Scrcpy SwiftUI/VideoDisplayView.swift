@@ -41,6 +41,10 @@ final class VideoNSView: NSView {
     private var currentLayer: AVSampleBufferDisplayLayer?
     private var dragOverlayView: NSView?
 
+    // Trackpad swipe-to-touch state
+    private var swipeTouchActive = false
+    private var swipeTouchPos: NSPoint = .zero
+
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { false }
 
@@ -163,9 +167,52 @@ final class VideoNSView: NSView {
     }
     override func scrollWheel(with e: NSEvent) {
         let pt = convert(e.locationInWindow, from: nil)
-        controlSocket?.sendScroll(pt, in: bounds.size,
-                                   deltaX: e.scrollingDeltaX,
-                                   deltaY: e.scrollingDeltaY)
+
+        // Mouse wheel (non-trackpad) or no phase info → send as scroll event.
+        guard e.hasPreciseScrollingDeltas else {
+            controlSocket?.sendScroll(pt, in: bounds.size,
+                                       deltaX: e.scrollingDeltaX,
+                                       deltaY: e.scrollingDeltaY,
+                                       precise: false)
+            return
+        }
+
+        // Trackpad momentum (coasting after lift): finger is already up — ignore.
+        if e.momentumPhase != [] { return }
+
+        // Trackpad gesture: simulate a real finger touch so Android receives
+        // native swipe events instead of scroll signals. This lets swipe-back,
+        // carousels, and other gesture-driven UI work without clicking.
+        switch e.phase {
+        case .began:
+            swipeTouchActive = true
+            swipeTouchPos = pt
+            controlSocket?.sendFingerDown(swipeTouchPos, in: bounds.size)
+
+        case .changed:
+            guard swipeTouchActive else { return }
+            // Both axes are negated for the same reason: with macOS natural scrolling OFF
+            // (common setting), a rightward finger produces scrollingDeltaX < 0, and an
+            // upward finger produces scrollingDeltaY < 0. Negating restores physical direction.
+            // Scale × 3 so a short trackpad swipe (~20 pt) moves the touch ~60 view points,
+            // enough for Android gesture recognition (needs ~100 device px minimum).
+            let scale: CGFloat = 1.5
+            swipeTouchPos.x -= e.scrollingDeltaX * scale
+            swipeTouchPos.y -= e.scrollingDeltaY * scale
+            controlSocket?.sendFingerMove(swipeTouchPos, in: bounds.size)
+
+        case .ended, .cancelled:
+            guard swipeTouchActive else { return }
+            swipeTouchActive = false
+            controlSocket?.sendFingerUp(swipeTouchPos, in: bounds.size)
+
+        default:
+            // phase == .none with precise deltas: older/non-gesture trackpad event.
+            controlSocket?.sendScroll(pt, in: bounds.size,
+                                       deltaX: e.scrollingDeltaX,
+                                       deltaY: e.scrollingDeltaY,
+                                       precise: true)
+        }
     }
 
     // MARK: - Keyboard
@@ -180,9 +227,17 @@ final class VideoNSView: NSView {
             controlSocket?.sendKeyDown(e.keyCode, modifierFlags: flags)
             return
         }
+        // Only use text-injection for printable characters.
+        // Control characters (ASCII < 0x20 or DEL 0x7F) — including Backspace (\u{7F}),
+        // Return (\r), Escape (\u{1B}), Tab (\t) — must go through the keycode path;
+        // the scrcpy text-injection message type ignores them silently.
+        let isPrintable = { (s: String) in
+            s.unicodeScalars.allSatisfy { $0.value >= 0x20 && $0.value != 0x7F }
+        }
         if let chars = e.characters, !chars.isEmpty,
            !e.modifierFlags.contains(.command),
-           !e.modifierFlags.contains(.control) {
+           !e.modifierFlags.contains(.control),
+           isPrintable(chars) {
             controlSocket?.sendText(chars)
         } else {
             controlSocket?.sendKeyDown(e.keyCode, modifierFlags: e.modifierFlags)

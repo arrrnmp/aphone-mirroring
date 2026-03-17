@@ -98,11 +98,14 @@ final class ScrcpyControlSocket: ObservableObject {
                        actionButton: 0, buttons: isDown ? MouseButton.left.androidButton : 0)
     }
 
-    func sendScroll(_ point: NSPoint, in viewSize: CGSize, deltaX: CGFloat, deltaY: CGFloat) {
+    func sendScroll(_ point: NSPoint, in viewSize: CGSize, deltaX: CGFloat, deltaY: CGFloat, precise: Bool = false) {
         let (x, y) = mapPoint(point, viewSize: viewSize)
-        // scrcpy scroll: 1.15 fixed-point: clamp to [-1,1] then multiply by 0x7FFF
-        let hScroll = Int16(clamping: Int((-deltaX / 3.0).clamped(to: -1...1) * 0x7FFF))
-        let vScroll = Int16(clamping: Int((deltaY / 3.0).clamped(to: -1...1) * 0x7FFF))
+        // precise=true  → trackpad (hasPreciseScrollingDeltas): deltas are already in pixels/points,
+        //                  typically 10–80 per event, so divide by a larger value to avoid saturation.
+        // precise=false → mouse wheel: each click produces delta ≈ 1–3, small divisor is fine.
+        let divisor: CGFloat = precise ? 80.0 : 3.0
+        let hScroll = Int16(clamping: Int((-deltaX / divisor).clamped(to: -1...1) * 0x7FFF))
+        let vScroll = Int16(clamping: Int((deltaY / divisor).clamped(to: -1...1) * 0x7FFF))
 
         var msg = Data(capacity: 21)
         msg.append(0x03)
@@ -139,6 +142,29 @@ final class ScrcpyControlSocket: ObservableObject {
         send(msg)
     }
 
+    // MARK: - Finger touch (trackpad gesture simulation, pointer ID 0)
+
+    func sendFingerDown(_ point: NSPoint, in viewSize: CGSize) {
+        let (x, y) = mapPoint(point, viewSize: viewSize)
+        sendTouchEvent(action: .down, pointerId: 0,
+                       x: x, y: y, pressure: 0xFFFF,
+                       actionButton: 0, buttons: 0)
+    }
+
+    func sendFingerMove(_ point: NSPoint, in viewSize: CGSize) {
+        let (x, y) = mapPoint(point, viewSize: viewSize)
+        sendTouchEvent(action: .move, pointerId: 0,
+                       x: x, y: y, pressure: 0xFFFF,
+                       actionButton: 0, buttons: 0)
+    }
+
+    func sendFingerUp(_ point: NSPoint, in viewSize: CGSize) {
+        let (x, y) = mapPoint(point, viewSize: viewSize)
+        sendTouchEvent(action: .up, pointerId: 0,
+                       x: x, y: y, pressure: 0,
+                       actionButton: 0, buttons: 0)
+    }
+
     // MARK: - Device controls
 
     func sendBackButton() {
@@ -173,6 +199,11 @@ final class ScrcpyControlSocket: ObservableObject {
     func sendVolumeDown() {
         sendKeycode(action: 0, keycode: 25, metaState: 0)  // AKEYCODE_VOLUME_DOWN
         sendKeycode(action: 1, keycode: 25, metaState: 0)
+    }
+
+    func sendMute() {
+        sendKeycode(action: 0, keycode: 164, metaState: 0) // AKEYCODE_VOLUME_MUTE
+        sendKeycode(action: 1, keycode: 164, metaState: 0)
     }
 
     // MARK: - Clipboard (client → device)
@@ -385,7 +416,7 @@ final class ScrcpyControlSocket: ObservableObject {
         case 0x30: return 61  // Tab
         case 0x31: return 62  // Space
         case 0x33: return 67  // Backspace (Delete)
-        case 0x35: return 111 // Escape
+        case 0x35: return 4   // Escape → AKEYCODE_BACK (back gesture)
         case 0x75: return 112 // Forward Delete
         case 0x7B: return 21  // Left
         case 0x7C: return 22  // Right

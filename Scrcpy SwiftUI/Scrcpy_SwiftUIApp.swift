@@ -6,13 +6,13 @@
 import SwiftUI
 import AppKit
 
-let controlBarHeight: CGFloat = 80
+let controlBarHeight: CGFloat = 52
 
 // MARK: - WindowManager
 
-/// Manages the window reference and the collapsible toolbar.
+/// Manages the main window and the floating control-panel side window.
 ///
-/// Layout when expanded (top → bottom):
+/// Main window layout when expanded (top → bottom):
 ///   ┌─────────────────────────────────┐  ← toolbar (52 pt) — traffic lights + controls
 ///   ├─────────────────────────────────┤
 ///   │                                 │
@@ -21,6 +21,8 @@ let controlBarHeight: CGFloat = 80
 ///   └─────────────────────────────────┘
 ///
 /// Collapsed: window = phone viewport only. Expanded: window grows upward by 52 pt.
+/// Control panel: borderless floating window that tracks the main window's position
+/// and snaps to whichever side has more screen space.
 @Observable
 final class WindowManager {
     private(set) weak var window: NSWindow?
@@ -29,6 +31,23 @@ final class WindowManager {
 
     private var phoneWidth: Int = 390
     private var phoneHeight: Int = 844
+
+    // MARK: - Control panel — stored state
+    private var controlPanel: NSWindow?
+    private var panelVisible   = false   // true = we *want* the panel on screen
+    private var isDragging     = false
+    private var dragDebounce:  DispatchWorkItem?
+    private var idleTimer:     DispatchWorkItem?
+    private var eventMonitor:  Any?
+    // NotificationCenter observers
+    private var obsMove:    Any?
+    private var obsResize:  Any?
+    private var obsClose:   Any?
+    private var obsWillMove: Any?
+    private var obsResign:  Any?
+    private var obsActive:  Any?
+    private var obsMini:    Any?
+    private var obsDemini:  Any?
 
     func register(_ w: NSWindow) {
         guard window !== w else { return }
@@ -134,12 +153,213 @@ final class WindowManager {
         w.contentAspectRatio = NSSize(width: phoneWidth, height: totalH)
     }
 
+    // MARK: - Control panel — public API
+
+    func showControlPanel(controlSocket: ScrcpyControlSocket) {
+        if controlPanel == nil { buildControlPanel(controlSocket: controlSocket) }
+        panelVisible = true
+        controlPanel?.level = isPinned ? .floating : .normal
+        updateControlPanelPosition()
+        controlPanel?.contentView?.alphaValue = 0
+        controlPanel?.orderFront(nil)
+        animatePanel(to: 1)
+        scheduleIdleDim()
+    }
+
+    func hideControlPanel() {
+        panelVisible = false
+        idleTimer?.cancel()
+        animatePanel(to: 0) { [weak self] in self?.controlPanel?.orderOut(nil) }
+    }
+
+    // MARK: - Control panel — construction
+
+    private func buildControlPanel(controlSocket: ScrcpyControlSocket) {
+        let hosting = NSHostingView(rootView: ControlPanelView(controlSocket: controlSocket))
+        hosting.sizingOptions = .preferredContentSize
+
+        let panel = NSWindow(contentRect: .zero, styleMask: [.borderless],
+                             backing: .buffered, defer: false)
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.hasShadow = true
+        panel.collectionBehavior = [.ignoresCycle]
+        panel.isMovableByWindowBackground = false
+        panel.contentView = hosting
+        panel.setContentSize(hosting.fittingSize)
+        controlPanel = panel
+
+        let nc = NotificationCenter.default
+
+        // Drag start: fade panel out (teleport illusion)
+        obsWillMove = nc.addObserver(
+            forName: NSWindow.willMoveNotification, object: window, queue: .main
+        ) { [weak self] _ in self?.onDragStart() }
+
+        // Each move event during drag: debounce to detect when drag ends
+        obsMove = nc.addObserver(
+            forName: NSWindow.didMoveNotification, object: window, queue: .main
+        ) { [weak self] _ in self?.onMainWindowMoved() }
+
+        // Resize (e.g. rotation): just reposition silently
+        obsResize = nc.addObserver(
+            forName: NSWindow.didResizeNotification, object: window, queue: .main
+        ) { [weak self] _ in self?.updateControlPanelPosition() }
+
+        // Main window closes → close panel too
+        obsClose = nc.addObserver(
+            forName: NSWindow.willCloseNotification, object: window, queue: .main
+        ) { [weak self] _ in self?.onMainWindowClose() }
+
+        // App loses focus → fade panel out
+        obsResign = nc.addObserver(
+            forName: NSApplication.didResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard self?.panelVisible == true else { return }
+            self?.animatePanel(to: 0)
+        }
+
+        // App regains focus → fade panel back in
+        obsActive = nc.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard self?.panelVisible == true else { return }
+            self?.animatePanel(to: 1)
+            self?.scheduleIdleDim()
+        }
+
+        // Main window minimized → hide panel (it would otherwise float orphaned over the desktop)
+        obsMini = nc.addObserver(
+            forName: NSWindow.didMiniaturizeNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            self?.controlPanel?.orderOut(nil)
+        }
+
+        // Main window restored from dock → bring panel back if it should be visible
+        obsDemini = nc.addObserver(
+            forName: NSWindow.didDeminiaturizeNotification, object: window, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.panelVisible else { return }
+            self.updateControlPanelPosition()
+            self.controlPanel?.contentView?.alphaValue = 0
+            self.controlPanel?.orderFront(nil)
+            self.animatePanel(to: 1)
+            self.scheduleIdleDim()
+        }
+
+        // Mouse activity on the panel: undim and reset idle timer
+        eventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .mouseEntered, .leftMouseDown, .rightMouseDown]
+        ) { [weak self] event in
+            if event.window === self?.controlPanel { self?.onPanelInteraction() }
+            return event
+        }
+    }
+
+    // MARK: - Control panel — drag teleport
+
+    private func onDragStart() {
+        guard panelVisible else { return }
+        isDragging = true
+        animatePanel(to: 0)
+        // Safety: if no didMove ever fires (click without drag), recover after 0.5 s
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self, self.isDragging else { return }
+            self.isDragging = false
+            if self.panelVisible { self.animatePanel(to: 1); self.scheduleIdleDim() }
+        }
+    }
+
+    private func onMainWindowMoved() {
+        guard isDragging else {
+            updateControlPanelPosition()   // programmatic move — just reposition
+            return
+        }
+        // Drag in progress — debounce: fire 0.15 s after the last move event
+        dragDebounce?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.isDragging = false
+            if self.panelVisible {
+                self.updateControlPanelPosition()
+                self.animatePanel(to: 1)
+                self.scheduleIdleDim()
+            }
+        }
+        dragDebounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
+    }
+
+    private func onMainWindowClose() {
+        idleTimer?.cancel()
+        dragDebounce?.cancel()
+        controlPanel?.close()
+        controlPanel = nil
+        let nc = NotificationCenter.default
+        [obsMove, obsResize, obsClose, obsWillMove, obsResign, obsActive, obsMini, obsDemini].forEach {
+            if let o = $0 { nc.removeObserver(o) }
+        }
+        if let m = eventMonitor { NSEvent.removeMonitor(m); eventMonitor = nil }
+    }
+
+    // MARK: - Control panel — idle dimming
+
+    private func onPanelInteraction() {
+        guard panelVisible else { return }
+        if let p = controlPanel, (p.contentView?.alphaValue ?? 0) < 0.95 { animatePanel(to: 1) }
+        scheduleIdleDim()
+    }
+
+    private func scheduleIdleDim() {
+        idleTimer?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.panelVisible else { return }
+            self.animatePanel(to: 0.35)
+        }
+        idleTimer = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: work)
+    }
+
+    // MARK: - Control panel — animation & positioning
+
+    private func animatePanel(to alpha: CGFloat, completion: (() -> Void)? = nil) {
+        guard let panel = controlPanel else { completion?(); return }
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.22
+            ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.contentView?.animator().alphaValue = alpha
+        }, completionHandler: completion)
+    }
+
+    private func updateControlPanelPosition() {
+        guard let main = window, let panel = controlPanel else { return }
+        let screen = main.screen ?? NSScreen.main
+        guard let screen else { return }
+
+        let mainFrame = main.frame
+        let panelSize = panel.frame.size
+        let visible   = screen.visibleFrame
+        let gap: CGFloat = 12
+
+        // More room on the right → right side, else left
+        let x: CGFloat = (visible.maxX - mainFrame.maxX) >= (mainFrame.minX - visible.minX)
+            ? mainFrame.maxX + gap
+            : mainFrame.minX - panelSize.width - gap
+
+        let y  = (mainFrame.midY - panelSize.height / 2)
+            .clamped(to: visible.minY ... max(visible.minY, visible.maxY - panelSize.height))
+        let cx = x.clamped(to: visible.minX ... max(visible.minX, visible.maxX - panelSize.width))
+
+        panel.setFrameOrigin(NSPoint(x: cx, y: y))
+    }
+
     // MARK: - Always on top
 
     func toggleAlwaysOnTop() {
         guard let w = window else { return }
         isPinned.toggle()
         w.level = isPinned ? .floating : .normal
+        controlPanel?.level = w.level
     }
 
     // MARK: - Traffic lights
