@@ -5,13 +5,20 @@
 //  Sends input events to scrcpy-server over the control socket using
 //  the scrcpy v3 binary protocol (all integers big-endian).
 //
-//  Message types:
+//  Client → device message types:
 //    0x00  INJECT_KEYCODE       14 bytes
 //    0x01  INJECT_TEXT          5 + N bytes
 //    0x02  INJECT_TOUCH_EVENT   32 bytes
 //    0x03  INJECT_SCROLL_EVENT  21 bytes
 //    0x04  BACK_OR_SCREEN_ON    2 bytes
+//    0x08  GET_CLIPBOARD        2 bytes  (type + copy_key — must be 2 bytes in scrcpy 3.3.4)
+//    0x09  SET_CLIPBOARD        14 + N bytes (seq:8 + paste:1 + len:4 + text:N)
 //    0x0A  SET_DISPLAY_POWER    2 bytes
+//    0x0B  ROTATE_DEVICE        1 byte
+//
+//  Device → client message types (received on control socket):
+//    0x00  CLIPBOARD            5 + N bytes (len:4 + text:N)
+//    0x01  ACK_CLIPBOARD        9 bytes (seq:8)
 //
 
 import Foundation
@@ -29,12 +36,24 @@ final class ScrcpyControlSocket: ObservableObject {
     private var videoWidth: Int = 0
     private var videoHeight: Int = 0
 
+    // MARK: - Clipboard state
+    private var clipboardSequence: UInt64 = 0
+    private var lastMacClipboardChangeCount: Int = 0
+    private var clipboardPollTask: Task<Void, Never>?
+    private var deviceMessageTask: Task<Void, Never>?
+    /// Called on the main actor when the control connection drops unexpectedly
+    /// (i.e. the remote host closed the connection, not a controlled stop).
+    var onDisconnect: (() -> Void)? = nil
+
     // MARK: - Lifecycle
 
     func start(connection: NWConnection, videoWidth: Int, videoHeight: Int) async {
         self.connection = connection
         self.videoWidth = videoWidth
         self.videoHeight = videoHeight
+        startDeviceMessageLoop(connection: connection)
+        sendGetClipboard()
+        startClipboardSync()
     }
 
     func updateVideoSize(width: Int, height: Int) {
@@ -43,6 +62,11 @@ final class ScrcpyControlSocket: ObservableObject {
     }
 
     func stop() async {
+        clipboardPollTask?.cancel()
+        clipboardPollTask = nil
+        deviceMessageTask?.cancel()
+        deviceMessageTask = nil
+        onDisconnect = nil
         connection?.cancel()
         connection = nil
     }
@@ -67,7 +91,9 @@ final class ScrcpyControlSocket: ObservableObject {
     func sendMouseMove(_ point: NSPoint, in viewSize: CGSize, buttonsDown: Int) {
         let (x, y) = mapPoint(point, viewSize: viewSize)
         let isDown = buttonsDown & 1 != 0
-        sendTouchEvent(action: .move, pointerId: MouseButton.left.pointerId,
+        // Use HOVER_MOVE (7) when no button is pressed — plain MOVE (2) only during drag
+        sendTouchEvent(action: isDown ? .move : .hover,
+                       pointerId: MouseButton.left.pointerId,
                        x: x, y: y, pressure: isDown ? 0xFFFF : 0,
                        actionButton: 0, buttons: isDown ? MouseButton.left.androidButton : 0)
     }
@@ -134,9 +160,133 @@ final class ScrcpyControlSocket: ObservableObject {
         send(Data([0x0B])) // SC_CONTROL_MSG_TYPE_ROTATE_DEVICE
     }
 
+    func sendPowerButton() {
+        sendKeycode(action: 0, keycode: 26, metaState: 0)  // AKEYCODE_POWER down
+        sendKeycode(action: 1, keycode: 26, metaState: 0)  // up
+    }
+
+    func sendVolumeUp() {
+        sendKeycode(action: 0, keycode: 24, metaState: 0)  // AKEYCODE_VOLUME_UP
+        sendKeycode(action: 1, keycode: 24, metaState: 0)
+    }
+
+    func sendVolumeDown() {
+        sendKeycode(action: 0, keycode: 25, metaState: 0)  // AKEYCODE_VOLUME_DOWN
+        sendKeycode(action: 1, keycode: 25, metaState: 0)
+    }
+
+    // MARK: - Clipboard (client → device)
+
+    /// Request device clipboard content (device will reply with DEVICE_MSG_TYPE_CLIPBOARD).
+    /// Must be 2 bytes: type(0x08) + copy_key(0=none, 1=copy, 2=cut).
+    func sendGetClipboard() {
+        send(Data([0x08, 0x00])) // SC_COPY_KEY_NONE
+    }
+
+    /// Push text to device clipboard. Set paste=true to also paste it immediately.
+    func sendSetClipboard(_ text: String, paste: Bool = false) {
+        guard let utf8 = text.data(using: .utf8) else { return }
+        clipboardSequence &+= 1
+        var msg = Data(capacity: 14 + utf8.count)
+        msg.append(0x09)
+        msg.appendBigEndian64(clipboardSequence)
+        msg.append(paste ? 1 : 0)
+        msg.appendBigEndian32(UInt32(utf8.count))
+        msg.append(utf8)
+        send(msg)
+    }
+
+    // MARK: - Device message loop (device → client, on control socket)
+
+    private func startDeviceMessageLoop(connection: NWConnection) {
+        deviceMessageTask?.cancel()
+        deviceMessageTask = Task.detached { [weak self] in
+            do {
+                while !Task.isCancelled {
+                    let typeByte = try await connection.receiveExactly(1)
+                    switch typeByte[0] {
+                    case 0x00: // SC_DEVICE_MSG_TYPE_CLIPBOARD
+                        let lenData = try await connection.receiveExactly(4)
+                        // Inline big-endian read to avoid calling @MainActor-inferred
+                        // Data extension methods from a detached (nonisolated) task.
+                        let len = Int(
+                            UInt32(lenData[0]) << 24 | UInt32(lenData[1]) << 16 |
+                            UInt32(lenData[2]) <<  8 | UInt32(lenData[3])
+                        )
+                        guard len > 0, len < 1_000_000 else { continue }
+                        let textData = try await connection.receiveExactly(len)
+                        if let text = String(data: textData, encoding: .utf8) {
+                            await MainActor.run { [weak self] in self?.applyDeviceClipboard(text) }
+                        }
+                    case 0x01: // SC_DEVICE_MSG_TYPE_ACK_CLIPBOARD
+                        _ = try await connection.receiveExactly(8) // sequence echo
+                    default:
+                        break
+                    }
+                }
+            } catch {
+                let cancelled = Task.isCancelled
+                await MainActor.run { [weak self] in
+                    if !cancelled {
+                        log("Control socket error: \(error) — stopping", level: .error)
+                        self?.onDisconnect?()
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Mac clipboard → device sync
+
+    private func startClipboardSync() {
+        clipboardPollTask?.cancel()
+        lastMacClipboardChangeCount = NSPasteboard.general.changeCount
+        // @MainActor annotation is critical: without it Swift treats the closure as
+        // nonisolated and the compiler silently skips calls to actor-isolated members.
+        clipboardPollTask = Task { @MainActor [weak self] in
+            var getClipboardTick = 0
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self else { return }
+
+                // ── Mac → device ──────────────────────────────────────────────
+                let pb = NSPasteboard.general
+                let count = pb.changeCount
+                if count != self.lastMacClipboardChangeCount {
+                    self.lastMacClipboardChangeCount = count
+                    if let text = pb.string(forType: .string), !text.isEmpty {
+                        self.sendSetClipboard(text)
+                        log("Clipboard sync → device (\(text.count) chars)", level: .debug)
+                    }
+                }
+
+                // ── Device → Mac fallback poll ─────────────────────────────────
+                // GET_CLIPBOARD every 3 s catches clipboard changes the server may
+                // have missed due to Android background-clipboard restrictions.
+                // clipboard_autosync=true handles most cases; this is belt-and-suspenders.
+                getClipboardTick += 1
+                if getClipboardTick >= 6 { // 6 × 500 ms = 3 s
+                    getClipboardTick = 0
+                    self.sendGetClipboard()
+                }
+            }
+        }
+    }
+
+    private func applyDeviceClipboard(_ text: String) {
+        let pb = NSPasteboard.general
+        // Avoid writing (and incrementing changeCount) when text is already in sync
+        guard pb.string(forType: .string) != text else { return }
+        pb.clearContents()
+        pb.setString(text, forType: .string)
+        // Update changeCount so the poll loop doesn't echo it back to device
+        lastMacClipboardChangeCount = pb.changeCount
+        log("Clipboard ← device: \(text.prefix(60))\(text.count > 60 ? "…" : "")", level: .debug)
+    }
+
     // MARK: - Private serialisation
 
-    private enum TouchAction: UInt8 { case down = 0, up = 1, move = 2 }
+    private enum TouchAction: UInt8 { case down = 0, up = 1, move = 2, hover = 7 }
 
     private func sendTouchEvent(action: TouchAction, pointerId: Int64,
                                  x: Int32, y: Int32,

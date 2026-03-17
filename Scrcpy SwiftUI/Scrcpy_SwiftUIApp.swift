@@ -6,7 +6,7 @@
 import SwiftUI
 import AppKit
 
-let controlBarHeight: CGFloat = 52
+let controlBarHeight: CGFloat = 80
 
 // MARK: - WindowManager
 
@@ -25,6 +25,7 @@ let controlBarHeight: CGFloat = 52
 final class WindowManager {
     private(set) weak var window: NSWindow?
     private(set) var barExpanded = false
+    private(set) var isPinned = false
 
     private var phoneWidth: Int = 390
     private var phoneHeight: Int = 844
@@ -50,6 +51,9 @@ final class WindowManager {
 
         // Lock to default portrait phone ratio until a device connects.
         applyAspectRatioConstraint(to: w)
+
+        // Restore always-on-top level in case window was recreated.
+        w.level = isPinned ? .floating : .normal
 
         // Only the toolbar drag area moves the window, not the phone surface.
         w.isMovableByWindowBackground = false
@@ -128,6 +132,14 @@ final class WindowManager {
         // window) maintains the correct ratio during user drag-resize.
         let totalH = phoneHeight + (barExpanded ? Int(controlBarHeight) : 0)
         w.contentAspectRatio = NSSize(width: phoneWidth, height: totalH)
+    }
+
+    // MARK: - Always on top
+
+    func toggleAlwaysOnTop() {
+        guard let w = window else { return }
+        isPinned.toggle()
+        w.level = isPinned ? .floating : .normal
     }
 
     // MARK: - Traffic lights

@@ -21,6 +21,9 @@ final class ScrcpyVideoStream: ObservableObject {
     private var connection: NWConnection?
     private var readTask: Task<Void, Never>?
 
+    /// Called on the main actor when the video connection drops unexpectedly.
+    var onDisconnect: (() -> Void)? = nil
+
     private var formatDescription: CMVideoFormatDescription?
     private var sps: Data?
     private var pps: Data?
@@ -62,6 +65,7 @@ final class ScrcpyVideoStream: ObservableObject {
 
     func stop() async {
         log("VideoStream stop — enqueued=\(enqueuedFrameCount) dropped=\(droppedFrameCount)")
+        onDisconnect = nil
         readTask?.cancel()
         readTask = nil
         connection?.cancel()
@@ -117,8 +121,10 @@ final class ScrcpyVideoStream: ObservableObject {
                     }
                 }
             } catch {
-                await MainActor.run {
+                let cancelled = Task.isCancelled
+                await MainActor.run { [weak self] in
                     log("readLoop error: \(error) — stopping", level: .error)
+                    if !cancelled { self?.onDisconnect?() }
                 }
                 break
             }

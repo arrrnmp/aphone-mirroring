@@ -90,26 +90,28 @@ struct ContentView: View {
     // MARK: - Control bar (toolbar row, lives above the phone in the VStack)
 
     private var controlBarContent: some View {
-        HStack(spacing: 0) {
-            // ── Traffic-light clearance ───────────────────────────────────────
-            Color.clear.frame(width: 76)
+        VStack(spacing: 6) {
+            // ── Row 1: traffic-light clearance + device label ─────────────────
+            HStack(spacing: 0) {
+                Color.clear.frame(width: 76)
+                deviceLabel
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
 
-            // ── Device label — centered in the space between lights & buttons ─
-            deviceLabel
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-                .foregroundStyle(.primary)
-                .frame(maxWidth: .infinity, alignment: .center)
-
-            // ── Android + utility buttons ─────────────────────────────────────
+            // ── Row 2: buttons — centered, never wider than available space ───
             GlassEffectContainer(spacing: 8) {
                 HStack(spacing: 8) {
                     androidButtons
                     utilityButtons
                 }
             }
-            .padding(.trailing, 12)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
+        .padding(.top, 8)
+        .padding(.bottom, 10)
         .frame(height: controlBarHeight)
         .frame(maxWidth: .infinity)
         .preferredColorScheme(.dark)
@@ -148,9 +150,12 @@ struct ContentView: View {
     private var androidButtons: some View {
         if manager.state == .connected {
             HStack(spacing: 2) {
-                barButton("arrow.left",   help: "Back")    { manager.controlSocket.sendBackButton() }
-                barButton("house",        help: "Home")    { manager.controlSocket.sendHomeButton() }
-                barButton("square.stack", help: "Recents") { manager.controlSocket.sendAppSwitch() }
+                barButton("arrow.left",        help: "Back")        { manager.controlSocket.sendBackButton() }
+                barButton("house",             help: "Home")        { manager.controlSocket.sendHomeButton() }
+                barButton("square.stack",      help: "Recents")     { manager.controlSocket.sendAppSwitch() }
+                barButton("speaker.minus",     help: "Volume Down") { manager.controlSocket.sendVolumeDown() }
+                barButton("speaker.plus",      help: "Volume Up")   { manager.controlSocket.sendVolumeUp() }
+                barButton("power",             help: "Power")       { manager.controlSocket.sendPowerButton() }
             }
             .glassEffect(.regular.interactive(), in: Capsule())
             .glassEffectID("android", in: glassNS)
@@ -166,6 +171,11 @@ struct ContentView: View {
                     .transition(.scale(scale: 0.85).combined(with: .opacity))
             }
             barButton("doc.text.magnifyingglass", help: "Logs") { showLogPanel.toggle() }
+            barButton(windowManager.isPinned ? "pin.fill" : "pin",
+                      help: windowManager.isPinned ? "Unpin (Always on Top)" : "Pin (Always on Top)",
+                      tint: windowManager.isPinned ? .yellow : nil) {
+                windowManager.toggleAlwaysOnTop()
+            }
             if manager.state == .connected {
                 barButton("rotate.right", help: "Rotate") { manager.controlSocket.sendRotateDevice() }
                     .transition(.scale(scale: 0.85).combined(with: .opacity))
@@ -219,7 +229,8 @@ struct ContentView: View {
         case .connected:
             VideoDisplayView(
                 displayLayer: manager.videoStream.displayLayer,
-                controlSocket: manager.controlSocket
+                controlSocket: manager.controlSocket,
+                onFileDrop: { urls in Task { await manager.pushFiles(urls) } }
             )
         case .connecting:
             phoneShell { connectingView }

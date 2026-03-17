@@ -25,9 +25,14 @@ final class ScrcpyManager: ObservableObject {
     @Published var state: ScrcpyState = .disconnected
     @Published var connectedDevice: String? = nil  // display name from handshake
     @Published var availableDevices: [String] = []  // display strings "Model (serial)"
+    @Published var batteryLevel: Int? = nil
+    @Published var batteryCharging: Bool = false
 
     // Serial of the currently connected device, used for disconnect detection
     private var connectedSerial: String? = nil
+
+    private var batteryPollTask: Task<Void, Never>?
+    private var statusItem: NSStatusItem?
 
     let videoStream = ScrcpyVideoStream()
     let controlSocket = ScrcpyControlSocket()
@@ -226,6 +231,7 @@ final class ScrcpyManager: ObservableObject {
                 "send_codec_meta=true",
                 "max_fps=90",
                 "video_bit_rate=8000000",
+                "clipboard_autosync=true",
             ]
             log("Server args: \(serverArgs.joined(separator: " "))", level: .debug)
 
@@ -268,11 +274,17 @@ final class ScrcpyManager: ObservableObject {
         log("Step 11: Handing off to video stream and control socket…")
         await videoStream.start(connection: videoConn, width: videoWidth, height: videoHeight)
         await controlSocket.start(connection: controlConn, videoWidth: videoWidth, videoHeight: videoHeight)
+        // Wire up disconnect detection: if either connection drops unexpectedly,
+        // transition to the error state so the user sees the error screen.
+        videoStream.onDisconnect = { [weak self] in self?.handleUnexpectedDisconnect() }
+        controlSocket.onDisconnect = { [weak self] in self?.handleUnexpectedDisconnect() }
 
         connectedDevice = deviceName
         connectedSerial = serial
         state = .connected
         log("──── Connected to \(deviceName) \(videoWidth)×\(videoHeight) ────", level: .ok)
+        setupStatusBar()
+        startBatteryPolling()
     }
 
     // MARK: - TCP Listener
@@ -331,10 +343,27 @@ final class ScrcpyManager: ObservableObject {
         }
     }
 
+    // MARK: - Unexpected disconnect
+
+    private func handleUnexpectedDisconnect() {
+        guard state == .connected else { return }
+        log("Remote host closed the connection — disconnecting", level: .error)
+        Task { @MainActor [weak self] in
+            guard let self, self.state == .connected else { return }
+            await self.disconnect()
+            self.state = .error("Device closed the connection unexpectedly.")
+        }
+    }
+
     // MARK: - Disconnect
 
     func disconnect() async {
         log("Disconnecting…")
+        videoStream.onDisconnect = nil
+        controlSocket.onDisconnect = nil
+        batteryPollTask?.cancel()
+        batteryPollTask = nil
+        removeStatusBar()
         connectTask?.cancel()
         connectTask = nil
         tcpListener?.cancel()
@@ -346,7 +375,183 @@ final class ScrcpyManager: ObservableObject {
         state = .disconnected
         connectedDevice = nil
         connectedSerial = nil
+        batteryLevel = nil
+        batteryCharging = false
         log("Disconnected.", level: .ok)
+    }
+
+    // MARK: - File push (drag & drop)
+
+    func pushFiles(_ urls: [URL]) async {
+        guard let serial = connectedSerial else { return }
+        let serialArgs = ["-s", serial]
+
+        let apkURLs  = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() == "apk" }
+        let fileURLs = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() != "apk" }
+
+        // ── APK installation ──────────────────────────────────────────────────
+        for url in apkURLs {
+            let filename = url.lastPathComponent
+            log("Installing \(filename)…")
+            // Copy to a temp path so iCloud/alias placeholders are resolved
+            let tmp = FileManager.default.temporaryDirectory
+                .appendingPathComponent(filename)
+            let accessed = url.startAccessingSecurityScopedResource()
+            do {
+                try? FileManager.default.removeItem(at: tmp)
+                try FileManager.default.copyItem(at: url, to: tmp)
+            } catch {
+                log("Could not read \(filename): \(error.localizedDescription)", level: .error)
+                if accessed { url.stopAccessingSecurityScopedResource() }
+                continue
+            }
+            if accessed { url.stopAccessingSecurityScopedResource() }
+            let result = await adb(serialArgs + ["install", "-r", tmp.path])
+            try? FileManager.default.removeItem(at: tmp)
+            if result.lowercased().contains("success") {
+                log("Installed \(filename) ✓", level: .ok)
+            } else {
+                log("Install failed for \(filename): \(result.trimmingCharacters(in: .whitespacesAndNewlines))", level: .error)
+            }
+        }
+
+        guard !fileURLs.isEmpty else { return }
+
+        // ── Regular file push ─────────────────────────────────────────────────
+        log("Pushing \(fileURLs.count) file(s) to /sdcard/Download/")
+
+        // Copy each file to a temp dir so that:
+        //   • Cloud/iCloud placeholders are fully materialised before adb reads them
+        //   • Lazy-loaded drag assets (Photos.app, etc.) are resolved to real data
+        //   • adb subprocess gets a simple, stable path without any alias indirection
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("scrcpy-push-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+
+        struct PushItem { let src: URL; let filename: String }
+        var items: [PushItem] = []
+
+        for url in fileURLs {
+            let filename = url.lastPathComponent
+            let dst = tmp.appendingPathComponent(filename)
+            let accessed = url.startAccessingSecurityScopedResource()
+            do {
+                try FileManager.default.copyItem(at: url, to: dst)
+                items.append(PushItem(src: dst, filename: filename))
+            } catch {
+                log("Could not read \(filename): \(error.localizedDescription)", level: .error)
+            }
+            if accessed { url.stopAccessingSecurityScopedResource() }
+        }
+
+        var pushedFilenames: [String] = []
+        for item in items {
+            log("Pushing \(item.filename)…")
+            let result = await adb(serialArgs + ["push", item.src.path, "/sdcard/Download/\(item.filename)"])
+            try? FileManager.default.removeItem(at: item.src)
+            if result.lowercased().contains("error") || result.lowercased().contains("failed") {
+                log("Push failed for \(item.filename): \(result.trimmingCharacters(in: .whitespacesAndNewlines))", level: .error)
+            } else {
+                log("Pushed \(item.filename) ✓", level: .ok)
+                pushedFilenames.append(item.filename)
+            }
+        }
+        try? FileManager.default.removeItem(at: tmp)
+
+        // Notify media scanner for each pushed file
+        for filename in pushedFilenames {
+            await adb(serialArgs + [
+                "shell", "am", "broadcast",
+                "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+                "-d", "file:///sdcard/Download/\(filename)"
+            ])
+        }
+
+        // Open Downloads folder on device
+        if !pushedFilenames.isEmpty {
+            await adb(serialArgs + [
+                "shell", "am", "start",
+                "-a", "android.intent.action.VIEW",
+                "-d", "content://com.android.externalstorage.documents/document/primary%3ADownload",
+                "-t", "vnd.android.document/directory"
+            ])
+            log("Opened Downloads folder on device", level: .debug)
+        }
+    }
+
+    // MARK: - Battery
+
+    private func startBatteryPolling() {
+        batteryPollTask?.cancel()
+        batteryPollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.refreshBattery()
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
+    }
+
+    private func refreshBattery() async {
+        guard let serial = connectedSerial else { return }
+        let output = await adb(["-s", serial, "shell", "dumpsys", "battery"])
+        guard let (level, charging) = parseBattery(output) else { return }
+        batteryLevel = level
+        batteryCharging = charging
+        updateStatusBar(level: level, charging: charging)
+        log("Battery: \(level)%\(charging ? " ⚡" : "")", level: .debug)
+    }
+
+    private func parseBattery(_ output: String) -> (level: Int, charging: Bool)? {
+        var level: Int? = nil
+        var status = 0
+        for line in output.components(separatedBy: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("level:"), let v = Int(t.dropFirst(6).trimmingCharacters(in: .whitespaces)) {
+                level = v
+            } else if t.hasPrefix("status:"), let v = Int(t.dropFirst(7).trimmingCharacters(in: .whitespaces)) {
+                status = v
+            }
+        }
+        guard let level else { return nil }
+        // status 2 = CHARGING, 5 = FULL (on charger)
+        return (level, status == 2 || status == 5)
+    }
+
+    // MARK: - Status bar
+
+    private func setupStatusBar() {
+        removeStatusBar()
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        guard let button = statusItem?.button else { return }
+        button.image = NSImage(systemSymbolName: "smartphone", accessibilityDescription: "Android Device")
+        button.image?.isTemplate = true
+        button.toolTip = "Android battery"
+    }
+
+    private func updateStatusBar(level: Int, charging: Bool) {
+        guard let button = statusItem?.button else { return }
+        let symbol = batteryLevelSymbol(level)
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Battery \(level)%")
+        button.image?.isTemplate = true
+        button.title = " \(charging ? "⚡" : "")\(level)%"
+        button.toolTip = "Android battery: \(level)%\(charging ? " (charging)" : "")"
+    }
+
+    private func removeStatusBar() {
+        if let item = statusItem {
+            NSStatusBar.system.removeStatusItem(item)
+            statusItem = nil
+        }
+    }
+
+    private func batteryLevelSymbol(_ level: Int) -> String {
+        switch level {
+        case 0..<13:  return "battery.0percent"
+        case 13..<38: return "battery.25percent"
+        case 38..<63: return "battery.50percent"
+        case 63..<88: return "battery.75percent"
+        default:      return "battery.100percent"
+        }
     }
 
     // MARK: - ADB helper
