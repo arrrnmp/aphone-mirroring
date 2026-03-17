@@ -3,7 +3,7 @@
 A small macOS SwiftUI app that displays and interacts with an Android device screen using scrcpy.
 
 ### Prerequisites
-- macOS 12+ with Xcode 14+ installed
+- macOS 26 with the Xcode 26+
 - Homebrew (https://brew.sh/)
 - An Android device with USB debugging enabled
 
