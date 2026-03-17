@@ -39,7 +39,6 @@ PhoneConnect requests a range of permissions to enable seamless integration with
 | Camera | Use phone camera as webcam or for document scanning on Mac |
 | Post Notifications | Show connection status and alerts on Android |
 
-All permissions are requested at runtime only as needed. You can use the app with only the features you enable.
 
 ## Getting Started
 - Build and run the app on your device or emulator
