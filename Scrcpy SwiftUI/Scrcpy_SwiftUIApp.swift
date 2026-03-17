@@ -10,54 +10,91 @@ let controlBarHeight: CGFloat = 52
 
 // MARK: - WindowManager
 
-/// Manages the window reference and the expandable control-bar accessory.
+/// Manages the window reference and the collapsible toolbar.
 ///
-/// Layout (top → bottom):
-///   ┌─────────────────────────────────┐  ← native title bar (~28 pt)
-///   │  ● ● ●   [device]   [buttons]  │  ← accessory VC (52 pt, expandable)
+/// Layout when expanded (top → bottom):
+///   ┌─────────────────────────────────┐  ← toolbar (52 pt) — contains traffic lights + controls
 ///   ├─────────────────────────────────┤
 ///   │                                 │
 ///   │         phone content           │  ← SwiftUI content view (fixed)
 ///   │                                 │
 ///   └─────────────────────────────────┘
 ///
-/// When the accessory is hidden the window shrinks by 52 pt (upward), so the
-/// phone content area never changes size — only the chrome above it grows/shrinks.
+/// Collapsed: the window is exactly the phone viewport — no chrome, no dead space.
+/// Expanded:  the window grows upward by 52 pt (origin.y stays fixed so the phone
+///            never moves); the toolbar materialises above the phone.
+/// Dragging:  only from the toolbar area (WindowDragArea), not the phone surface.
 @Observable
 final class WindowManager {
     private(set) weak var window: NSWindow?
     private(set) var barExpanded = false
-    private(set) var accessoryVC: NSTitlebarAccessoryViewController?
 
     func register(_ w: NSWindow) {
         window = w
 
-        // Hide the title text; keep traffic lights + native drag surface.
+        // hiddenTitleBar + fullSizeContentView means the content fills the entire
+        // window frame with no extra chrome. The transparent title bar overlaps
+        // the topmost ~28 pt of our content but is invisible (no background, no
+        // traffic lights). With isOpaque = false, macOS shadows the visible pixels
+        // only, so the shadow hugs the phone shape.
         w.titleVisibility = .hidden
-        w.titlebarAppearsTransparent = false
+        w.titlebarAppearsTransparent = true
+        w.backgroundColor = .clear
+        w.isOpaque = false
 
-        // Build the expandable accessory bar.
-        let vc = NSTitlebarAccessoryViewController()
-        vc.layoutAttribute = .bottom        // sits below title bar, above content
-        vc.isHidden = true                  // collapsed at launch
+        // Phone surface must NOT move the window — only the toolbar drag area does.
+        w.isMovableByWindowBackground = false
 
-        // Placeholder; ContentView replaces this with an NSHostingView.
-        let placeholder = NSView(frame: NSRect(x: 0, y: 0, width: 0, height: controlBarHeight))
-        vc.view = placeholder
-
-        w.addTitlebarAccessoryViewController(vc)
-        accessoryVC = vc
+        // Traffic lights start invisible; revealed when the toolbar expands.
+        setTrafficLightsAlpha(0, hidden: true)
     }
 
-    /// Expand or collapse the control bar.
-    /// AppKit resizes the window frame automatically (grows/shrinks upward).
+    /// Expand or collapse the toolbar.
+    /// The window grows/shrinks upward (origin.y stays fixed = phone never moves).
     func setBarExpanded(_ expanded: Bool) {
-        guard expanded != barExpanded, let vc = accessoryVC else { return }
+        guard expanded != barExpanded, let w = window else { return }
         barExpanded = expanded
-        NSAnimationContext.runAnimationGroup { ctx in
+
+        if expanded {
+            setTrafficLightsAlpha(0, hidden: false)
+        }
+
+        var newFrame = w.frame
+        if expanded {
+            newFrame.size.height += controlBarHeight   // grow up
+        } else {
+            newFrame.size.height -= controlBarHeight   // shrink up
+        }
+
+        NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.22
             ctx.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            vc.animator().isHidden = !expanded
+            w.animator().setFrame(newFrame, display: true)
+            animateTrafficLights(alpha: expanded ? 1 : 0)
+        }, completionHandler: {
+            if !expanded { self.setTrafficLightsAlpha(0, hidden: true) }
+        })
+    }
+
+    // MARK: - Traffic lights helpers
+
+    private var trafficLightButtons: [NSButton] {
+        guard let w = window else { return [] }
+        return [.closeButton, .miniaturizeButton, .zoomButton].compactMap {
+            w.standardWindowButton($0)
+        }
+    }
+
+    private func setTrafficLightsAlpha(_ alpha: CGFloat, hidden: Bool) {
+        trafficLightButtons.forEach {
+            $0.alphaValue = alpha
+            $0.isHidden = hidden
+        }
+    }
+
+    private func animateTrafficLights(alpha: CGFloat) {
+        trafficLightButtons.forEach {
+            $0.animator().alphaValue = alpha
         }
     }
 }
@@ -88,49 +125,28 @@ struct Scrcpy_SwiftUIApp: App {
                 .preferredColorScheme(.dark)
                 .environment(appDelegate.windowManager)
         }
-        .windowStyle(.titleBar)             // real traffic lights + native drag
-        .windowResizability(.contentSize)
+        // hiddenTitleBar applies fullSizeContentView so the content fills the
+        // entire window frame — no dead space above the phone.
+        .windowStyle(.hiddenTitleBar)
+        // contentMinSize lets our manual setFrame calls work without fighting a
+        // contentSize constraint, while still preventing the user from making the
+        // window smaller than the phone.
+        .windowResizability(.contentMinSize)
         .defaultSize(width: 390, height: 844)
     }
 }
 
-// MARK: - AspectRatioConfigurator
+// MARK: - WindowDragArea
 
-/// Sets window.contentAspectRatio so the phone maintains its aspect ratio on resize.
-struct AspectRatioConfigurator: NSViewRepresentable {
-    let size: CGSize
+/// An NSView that lets the toolbar row drag the window while leaving all
+/// SwiftUI button interactions intact (buttons are in front in z-order).
+struct WindowDragArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> DragNSView { DragNSView() }
+    func updateNSView(_ nsView: DragNSView, context: Context) {}
 
-    func makeNSView(context: Context) -> NSView { NSView() }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        guard size != .zero else { return }
-        DispatchQueue.main.async {
-            guard let window = nsView.window else { return }
-            window.contentAspectRatio = size
+    final class DragNSView: NSView {
+        override func mouseDown(with event: NSEvent) {
+            window?.performDrag(with: event)
         }
-    }
-}
-
-// MARK: - ControlBarAccessoryInstaller
-
-/// Mounts a SwiftUI view into the window's titlebar accessory VC.
-/// Placed as a zero-size `.background` in ContentView so it can reach the window.
-struct ControlBarAccessoryInstaller<Content: View>: NSViewRepresentable {
-    @Environment(WindowManager.self) private var windowManager
-    let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    func makeNSView(context: Context) -> NSView { NSView() }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        guard let vc = windowManager.accessoryVC else { return }
-        // Replace placeholder with a hosting view exactly once.
-        if vc.view is NSHostingView<Content> { return }
-        let hosting = NSHostingView(rootView: content)
-        hosting.frame = NSRect(x: 0, y: 0, width: 0, height: controlBarHeight)
-        vc.view = hosting
     }
 }

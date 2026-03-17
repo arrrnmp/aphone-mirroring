@@ -44,6 +44,10 @@ final class VideoNSView: NSView {
         currentLayer?.removeFromSuperlayer()
         currentLayer = layer
         wantsLayer = true
+        self.layer?.backgroundColor = CGColor.clear
+        self.layer?.cornerRadius = 40
+        self.layer?.cornerCurve = .continuous
+        self.layer?.masksToBounds = true
         self.layer?.addSublayer(layer)
         layer.frame = bounds
         layer.videoGravity = .resizeAspect

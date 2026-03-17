@@ -19,29 +19,40 @@ struct ContentView: View {
     private var barExpanded: Bool { windowManager.barExpanded }
 
     var body: some View {
-        ZStack {
-            // ── Phone content — the full content-view area ────────────────
-            // Top corners are always square: the title bar / accessory bar
-            // above is the visual boundary. Bottom corners stay rounded.
-            phoneSilhouette
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipShape(
-                    UnevenRoundedRectangle(
-                        topLeadingRadius: 0,
-                        bottomLeadingRadius: 40,
-                        bottomTrailingRadius: 40,
-                        topTrailingRadius: 0,
-                        style: .continuous
-                    )
-                )
+        VStack(spacing: 0) {
+            // ── Toolbar — appears above the phone when the bar is expanded ────
+            // The window grows upward by controlBarHeight to reveal this area;
+            // the phone stays fixed below.
+            if barExpanded {
+                controlBarContent
+                    .transition(.opacity)
+            }
 
-            if showLogPanel {
-                logPanelOverlay
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .zIndex(20)
+            // ── Phone viewport ────────────────────────────────────────────────
+            ZStack {
+                phoneSilhouette
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 40, style: .continuous))
+
+                if showLogPanel {
+                    logPanelOverlay
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .zIndex(20)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // Hover near the top edge of the phone to reveal the toolbar
+            .onContinuousHover { phase in
+                switch phase {
+                case .active(let pt):
+                    if pt.y < 24 { showBar() } else { scheduleHide() }
+                case .ended:
+                    scheduleHide()
+                }
             }
         }
         .ignoresSafeArea(edges: .all)
+        .animation(.easeInOut(duration: 0.22), value: barExpanded)
         .animation(.easeInOut(duration: 0.2), value: manager.state)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showLogPanel)
         .task { await manager.refreshDevices() }
@@ -50,23 +61,6 @@ struct ContentView: View {
                 width: Int(size.width),
                 height: Int(size.height)
             )
-        }
-        .background(AspectRatioConfigurator(size: manager.videoStream.videoSize))
-        // Mount the control-bar content into the titlebar accessory VC
-        .background(
-            ControlBarAccessoryInstaller {
-                controlBarContent
-            }
-        )
-        // Hover near the top of the content view to reveal the bar
-        .onContinuousHover { phase in
-            switch phase {
-            case .active(let pt):
-                // Trigger zone is the top 24 pt of the content view
-                if pt.y < 24 { showBar() } else { scheduleHide() }
-            case .ended:
-                scheduleHide()
-            }
         }
     }
 
@@ -90,26 +84,26 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Control bar (lives in the accessory VC, above the phone content)
+    // MARK: - Control bar (toolbar row, lives above the phone in the VStack)
 
     private var controlBarContent: some View {
         HStack(spacing: 0) {
-            // ── Device label ──────────────────────────────────────────────
+            // ── Traffic-light clearance + device label ────────────────────────
+            // Traffic lights are rendered by AppKit in the title bar area, which
+            // overlaps the top ~28 pt of the toolbar. They sit from approx x=10
+            // to x=65, so we need ~76 pt of leading clearance.
             deviceLabel
                 .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
                 .foregroundStyle(.primary)
-                .padding(.leading, 16)
+                .padding(.leading, 76)
 
             Spacer()
 
-            // ── Android + utility buttons ─────────────────────────────────
+            // ── Android + utility buttons ─────────────────────────────────────
             GlassEffectContainer(spacing: 8) {
-                HStack(spacing: 6) {
+                HStack(spacing: 8) {
                     androidButtons
-                    if manager.state == .connected || !manager.availableDevices.isEmpty {
-                        utilityDivider
-                    }
                     utilityButtons
                 }
             }
@@ -118,13 +112,21 @@ struct ContentView: View {
         .frame(height: controlBarHeight)
         .frame(maxWidth: .infinity)
         .preferredColorScheme(.dark)
-        // Keep the bar visible for interaction — don't dismiss on hover over it
+        // The toolbar row is the window's drag surface; glass samples the desktop behind
+        .background {
+            ZStack {
+                WindowDragArea()
+                Rectangle()
+                    .fill(.clear)
+                    .glassEffect(.regular, in: Rectangle())
+                    .allowsHitTesting(false)
+            }
+        }
+        // Keep the bar alive while hovering over it
         .onContinuousHover { phase in
             switch phase {
-            case .active:
-                showBar()
-            case .ended:
-                scheduleHide()
+            case .active: showBar()
+            case .ended:  scheduleHide()
             }
         }
     }
@@ -149,13 +151,10 @@ struct ContentView: View {
                 barButton("house",        help: "Home")    { manager.controlSocket.sendHomeButton() }
                 barButton("square.stack", help: "Recents") { manager.controlSocket.sendAppSwitch() }
             }
-            .glassEffect(.regular, in: Capsule())
+            .glassEffect(.regular.interactive(), in: Capsule())
             .glassEffectID("android", in: glassNS)
+            .transition(.scale(scale: 0.85).combined(with: .opacity))
         }
-    }
-
-    private var utilityDivider: some View {
-        Divider().frame(height: 18).opacity(0.4).padding(.horizontal, 2)
     }
 
     @ViewBuilder
@@ -163,15 +162,17 @@ struct ContentView: View {
         HStack(spacing: 2) {
             if manager.state != .connected && !manager.availableDevices.isEmpty {
                 connectMenuButton
+                    .transition(.scale(scale: 0.85).combined(with: .opacity))
             }
             barButton("doc.text.magnifyingglass", help: "Logs") { showLogPanel.toggle() }
             if manager.state == .connected {
                 barButton("stop.circle.fill", help: "Disconnect", tint: .red) {
                     Task { await manager.disconnect() }
                 }
+                .transition(.scale(scale: 0.85).combined(with: .opacity))
             }
         }
-        .glassEffect(.regular, in: Capsule())
+        .glassEffect(.regular.interactive(), in: Capsule())
         .glassEffectID("utility", in: glassNS)
     }
 
@@ -183,7 +184,7 @@ struct ContentView: View {
             Divider()
             Button("Refresh") { Task { await manager.refreshDevices() } }
         } label: {
-            Image(systemName: "plus.circle.fill")
+            Image(systemName: "plus")
                 .frame(width: 30, height: 30)
         }
         .buttonStyle(.plain)
@@ -230,13 +231,7 @@ struct ContentView: View {
         ZStack {
             Rectangle()
                 .fill(.clear)
-                .glassEffect(.regular, in: UnevenRoundedRectangle(
-                    topLeadingRadius: 0,
-                    bottomLeadingRadius: 40,
-                    bottomTrailingRadius: 40,
-                    topTrailingRadius: 0,
-                    style: .continuous
-                ))
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 40, style: .continuous))
             content()
         }
     }
@@ -251,13 +246,18 @@ struct ContentView: View {
                     Label("Debug Log", systemImage: "terminal.fill")
                         .font(.system(size: 13, weight: .semibold))
                     Spacer()
-                    Button("Clear") { appLog.clear() }
-                        .buttonStyle(.glass)
-                    Button { showLogPanel = false } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    GlassEffectContainer(spacing: 6) {
+                        HStack(spacing: 6) {
+                            Button("Clear") { appLog.clear() }
+                                .buttonStyle(.glass)
+                                .controlSize(.small)
+                            Button { showLogPanel = false } label: {
+                                Image(systemName: "xmark")
+                            }
+                            .buttonStyle(.glass)
+                            .controlSize(.small)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .padding(.leading, 4)
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
@@ -294,14 +294,11 @@ struct ContentView: View {
         VStack(spacing: 0) {
             Spacer()
             VStack(spacing: 20) {
-                ZStack {
-                    Circle()
-                        .fill(.primary.opacity(0.06))
-                        .frame(width: 88, height: 88)
-                    Image(systemName: "smartphone")
-                        .font(.system(size: 38, weight: .light))
-                        .foregroundStyle(.primary.opacity(0.6))
-                }
+                Image(systemName: "smartphone")
+                    .font(.system(size: 38, weight: .light))
+                    .foregroundStyle(.primary.opacity(0.7))
+                    .frame(width: 88, height: 88)
+                    .glassEffect(.regular, in: .circle)
                 VStack(spacing: 6) {
                     Text("Connecting")
                         .font(.system(size: 20, weight: .semibold))
@@ -312,7 +309,7 @@ struct ContentView: View {
                 }
                 ProgressView()
                     .progressViewStyle(.circular)
-                    .scaleEffect(0.9)
+                    .controlSize(.regular)
             }
             Spacer()
         }
@@ -323,16 +320,13 @@ struct ContentView: View {
         VStack(spacing: 0) {
             Spacer()
             VStack(spacing: 32) {
-                ZStack {
-                    Circle()
-                        .fill(.primary.opacity(0.06))
-                        .frame(width: 100, height: 100)
-                    Image(systemName: manager.availableDevices.isEmpty
-                          ? "cable.connector.slash"
-                          : "smartphone")
-                        .font(.system(size: 40, weight: .light))
-                        .foregroundStyle(.primary.opacity(0.5))
-                }
+                Image(systemName: manager.availableDevices.isEmpty
+                      ? "cable.connector.slash"
+                      : "smartphone")
+                    .font(.system(size: 40, weight: .light))
+                    .foregroundStyle(.primary.opacity(0.65))
+                    .frame(width: 100, height: 100)
+                    .glassEffect(.regular, in: .circle)
                 VStack(spacing: 6) {
                     Text(manager.availableDevices.isEmpty ? "No Device Found" : "Choose a Device")
                         .font(.system(size: 22, weight: .semibold))
@@ -354,7 +348,7 @@ struct ContentView: View {
                             .frame(maxWidth: 180)
                             .padding(.vertical, 2)
                     }
-                    .buttonStyle(.glass)
+                    .buttonStyle(.glassProminent)
                 } else {
                     DevicePickerView(
                         devices: manager.availableDevices,
@@ -378,15 +372,12 @@ struct ContentView: View {
         VStack(spacing: 0) {
             Spacer()
             VStack(spacing: 28) {
-                ZStack {
-                    Circle()
-                        .fill(.red.opacity(0.12))
-                        .frame(width: 88, height: 88)
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 36, weight: .medium))
-                        .foregroundStyle(.red.opacity(0.85))
-                        .symbolRenderingMode(.hierarchical)
-                }
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 36, weight: .medium))
+                    .foregroundStyle(.red)
+                    .symbolRenderingMode(.hierarchical)
+                    .frame(width: 88, height: 88)
+                    .glassEffect(.regular.tint(.red.opacity(0.25)), in: .circle)
                 VStack(spacing: 8) {
                     Text("Connection Failed")
                         .font(.system(size: 20, weight: .semibold))
@@ -406,7 +397,7 @@ struct ContentView: View {
                         .frame(maxWidth: 180)
                         .padding(.vertical, 2)
                 }
-                .buttonStyle(.glass)
+                .buttonStyle(.glassProminent)
             }
             .padding(.horizontal, 32)
             Spacer()
@@ -426,7 +417,7 @@ private struct DevicePickerView: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            GlassEffectContainer(spacing: 10) {
+            GlassEffectContainer(spacing: 8) {
                 VStack(spacing: 8) {
                     ForEach(Array(devices.enumerated()), id: \.offset) { index, device in
                         DeviceRow(device: device, index: index) {
@@ -439,17 +430,11 @@ private struct DevicePickerView: View {
             }
 
             Button(action: onRefresh) {
-                HStack(spacing: 6) {
-                    Image(systemName: "arrow.clockwise")
-                        .font(.system(size: 12, weight: .medium))
-                    Text("Refresh")
-                        .font(.system(size: 12, weight: .medium))
-                }
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
+                Label("Refresh", systemImage: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .medium))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.glass)
+            .frame(maxWidth: .infinity)
         }
     }
 }
@@ -458,8 +443,6 @@ private struct DeviceRow: View {
     let device: String
     let index: Int
     let action: () -> Void
-
-    @State private var isHovered = false
 
     private var displayName: String {
         if let paren = device.firstIndex(of: "(") {
@@ -499,14 +482,13 @@ private struct DeviceRow: View {
 
                 Image(systemName: "chevron.right")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(isHovered ? AnyShapeStyle(.secondary) : AnyShapeStyle(.quaternary))
+                    .foregroundStyle(.tertiary)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .onHover { isHovered = $0 }
     }
 }
 
