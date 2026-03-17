@@ -1,5 +1,5 @@
 //
-//  Scrcpy_SwiftUIApp.swift
+//  aPhone_MirroringApp.swift
 //  Scrcpy SwiftUI
 //
 
@@ -391,7 +391,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 // MARK: - App entry point
 
 @main
-struct Scrcpy_SwiftUIApp: App {
+struct aPhone_MirroringApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
