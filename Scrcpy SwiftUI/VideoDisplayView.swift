@@ -45,12 +45,9 @@ final class VideoNSView: NSView {
         currentLayer = layer
         wantsLayer = true
         self.layer?.backgroundColor = CGColor.clear
-        self.layer?.cornerRadius = 40
-        self.layer?.cornerCurve = .continuous
-        self.layer?.masksToBounds = true
         self.layer?.addSublayer(layer)
         layer.frame = bounds
-        layer.videoGravity = .resizeAspect
+        layer.videoGravity = .resize
         layer.backgroundColor = CGColor.black
     }
 
@@ -113,7 +110,6 @@ final class VideoNSView: NSView {
     // MARK: - Keyboard
 
     override func keyDown(with e: NSEvent) {
-        // Attempt text injection first for printable characters
         if let chars = e.characters, !chars.isEmpty,
            !e.modifierFlags.contains(.command),
            !e.modifierFlags.contains(.control) {

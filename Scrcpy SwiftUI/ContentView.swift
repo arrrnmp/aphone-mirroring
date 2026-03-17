@@ -12,7 +12,6 @@ struct ContentView: View {
     @StateObject private var appLog = AppLog.shared
     @State private var showLogPanel = false
     @State private var hideTask: Task<Void, Never>? = nil
-
     @Environment(WindowManager.self) private var windowManager
     @Namespace private var glassNS
 
@@ -32,7 +31,6 @@ struct ContentView: View {
             ZStack {
                 phoneSilhouette
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .clipShape(RoundedRectangle(cornerRadius: 40, style: .continuous))
 
                 if showLogPanel {
                     logPanelOverlay
@@ -52,6 +50,8 @@ struct ContentView: View {
             }
         }
         .ignoresSafeArea(edges: .all)
+        .background(Color.clear)
+        .background(WindowConfigurator(windowManager: windowManager))
         .animation(.easeInOut(duration: 0.22), value: barExpanded)
         .animation(.easeInOut(duration: 0.2), value: manager.state)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showLogPanel)
@@ -61,6 +61,9 @@ struct ContentView: View {
                 width: Int(size.width),
                 height: Int(size.height)
             )
+            if size.width > 0 && size.height > 0 {
+                windowManager.setAspectRatio(width: Int(size.width), height: Int(size.height))
+            }
         }
     }
 
@@ -78,7 +81,7 @@ struct ContentView: View {
         guard barExpanded else { return }
         hideTask?.cancel()
         hideTask = Task {
-            try? await Task.sleep(for: .seconds(2))
+            try? await Task.sleep(for: .seconds(0.8))
             guard !Task.isCancelled else { return }
             windowManager.setBarExpanded(false)
         }
@@ -88,17 +91,15 @@ struct ContentView: View {
 
     private var controlBarContent: some View {
         HStack(spacing: 0) {
-            // ── Traffic-light clearance + device label ────────────────────────
-            // Traffic lights are rendered by AppKit in the title bar area, which
-            // overlaps the top ~28 pt of the toolbar. They sit from approx x=10
-            // to x=65, so we need ~76 pt of leading clearance.
+            // ── Traffic-light clearance ───────────────────────────────────────
+            Color.clear.frame(width: 76)
+
+            // ── Device label — centered in the space between lights & buttons ─
             deviceLabel
                 .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
                 .foregroundStyle(.primary)
-                .padding(.leading, 76)
-
-            Spacer()
+                .frame(maxWidth: .infinity, alignment: .center)
 
             // ── Android + utility buttons ─────────────────────────────────────
             GlassEffectContainer(spacing: 8) {
@@ -166,6 +167,8 @@ struct ContentView: View {
             }
             barButton("doc.text.magnifyingglass", help: "Logs") { showLogPanel.toggle() }
             if manager.state == .connected {
+                barButton("rotate.right", help: "Rotate") { manager.controlSocket.sendRotateDevice() }
+                    .transition(.scale(scale: 0.85).combined(with: .opacity))
                 barButton("stop.circle.fill", help: "Disconnect", tint: .red) {
                     Task { await manager.disconnect() }
                 }
@@ -231,7 +234,7 @@ struct ContentView: View {
         ZStack {
             Rectangle()
                 .fill(.clear)
-                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 40, style: .continuous))
+                .glassEffect(.regular, in: Rectangle())
             content()
         }
     }

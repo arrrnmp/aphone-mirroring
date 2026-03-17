@@ -32,7 +32,7 @@ final class ScrcpyVideoStream: ObservableObject {
     private var enqueuedFrameCount = 0
 
     init() {
-        displayLayer.videoGravity = .resizeAspect
+        displayLayer.videoGravity = .resize
         displayLayer.backgroundColor = CGColor.clear
         log("ScrcpyVideoStream init, displayLayer=\(displayLayer)", level: .debug)
     }
@@ -150,8 +150,14 @@ final class ScrcpyVideoStream: ObservableObject {
         }
         if let s = sps, let p = pps {
             formatDescription = makeFormatDescription(sps: s, pps: p)
-            if formatDescription != nil {
+            if let desc = formatDescription {
                 log("Format description built OK", level: .ok)
+                let dim = CMVideoFormatDescriptionGetDimensions(desc)
+                let newSize = CGSize(width: CGFloat(dim.width), height: CGFloat(dim.height))
+                if newSize != videoSize {
+                    videoSize = newSize
+                    log("Video size updated to \(dim.width)×\(dim.height)", level: .ok)
+                }
             } else {
                 log("Format description build FAILED", level: .error)
             }

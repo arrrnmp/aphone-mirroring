@@ -130,6 +130,10 @@ final class ScrcpyControlSocket: ObservableObject {
         sendKeycode(action: 1, keycode: 187, metaState: 0)
     }
 
+    func sendRotateDevice() {
+        send(Data([0x0B])) // SC_CONTROL_MSG_TYPE_ROTATE_DEVICE
+    }
+
     // MARK: - Private serialisation
 
     private enum TouchAction: UInt8 { case down = 0, up = 1, move = 2 }
