@@ -6,7 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		9302085E2F70A647006399D7 /* IOBluetooth.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9302085D2F70A647006399D7 /* IOBluetooth.framework */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
+		9302085D2F70A647006399D7 /* IOBluetooth.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = IOBluetooth.framework; path = System/Library/Frameworks/IOBluetooth.framework; sourceTree = SDKROOT; };
 		938723702F6896FA004D1014 /* Scrcpy SwiftUI.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Scrcpy SwiftUI.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -23,16 +28,26 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9302085E2F70A647006399D7 /* IOBluetooth.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		9302085C2F70A647006399D7 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				9302085D2F70A647006399D7 /* IOBluetooth.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		938723672F6896FA004D1014 = {
 			isa = PBXGroup;
 			children = (
 				938723722F6896FA004D1014 /* aPhone MIrroring */,
+				9302085C2F70A647006399D7 /* Frameworks */,
 				938723712F6896FA004D1014 /* Products */,
 			);
 			sourceTree = "<group>";

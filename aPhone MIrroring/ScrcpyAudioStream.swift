@@ -46,7 +46,7 @@ private final class AudioRingBuffer: @unchecked Sendable {
     // MARK: Writer side
 
     /// Convert s16le interleaved stereo payload and append to ring buffer.
-    /// Drops frames that don't fit (overflow) rather than blocking.
+    /// On overflow, flushes oldest frames to keep audio current (low latency).
     func write(s16lePayload payload: Data) {
         let frameCount = payload.count / 4  // 2 ch × 2 bytes
         guard frameCount > 0 else { return }
@@ -56,8 +56,13 @@ private final class AudioRingBuffer: @unchecked Sendable {
             let s16 = base.assumingMemoryBound(to: Int16.self)
 
             os_unfair_lock_lock(&lock)
-            let free    = capacity - count
-            let toWrite = min(frameCount, free)
+            // If incoming frames would overflow, flush oldest to keep buffer current
+            if count + frameCount > capacity {
+                let excess = count + frameCount - capacity
+                readIdx = (readIdx + excess) % capacity
+                count  -= excess
+            }
+            let toWrite = min(frameCount, capacity)
             for i in 0..<toWrite {
                 let pos = (writeIdx + i) % capacity
                 L[pos] = Float(s16[i &* 2])      / 32_767.0
@@ -117,8 +122,8 @@ final class ScrcpyAudioStream {
 
     var onDisconnect: (() -> Void)?
 
-    private var readTask:   Task<Void, Never>?
-    private let engine    = AVAudioEngine()
+    private var readTask:    Task<Void, Never>?
+    private var engine:     AVAudioEngine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
 
     // scrcpy AudioConfig.java: 48 000 Hz, stereo, PCM_16BIT.
@@ -142,7 +147,7 @@ final class ScrcpyAudioStream {
 
     func stop() async {
         readTask?.cancel()
-        readTask    = nil
+        readTask     = nil
         onDisconnect = nil
 
         engine.stop()
@@ -152,9 +157,17 @@ final class ScrcpyAudioStream {
         }
     }
 
+    /// Mute or unmute audio without stopping the stream.
+    func setAudioEnabled(_ enabled: Bool) {
+        engine.mainMixerNode.outputVolume = enabled ? 1.0 : 0.0
+    }
+
     // MARK: - Engine
 
     private func buildEngine() {
+        // Fresh engine each connection — avoids accumulated state from prior sessions
+        let eng     = AVAudioEngine()
+        engine      = eng
         let fmt     = Self.format
         let ringRef = ring
 
@@ -164,10 +177,10 @@ final class ScrcpyAudioStream {
         }
 
         sourceNode = node
-        engine.attach(node)
-        engine.connect(node, to: engine.mainMixerNode, format: fmt)
+        eng.attach(node)
+        eng.connect(node, to: eng.mainMixerNode, format: fmt)
         do {
-            try engine.start()
+            try eng.start()
         } catch {
             log("Audio engine start failed: \(error)", level: .error)
         }

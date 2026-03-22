@@ -38,6 +38,9 @@ final class ScrcpyManager: ObservableObject {
     @Published var batteryLevel: Int? = nil
     @Published var batteryCharging: Bool = false
     @Published var screenshotFlash: ScreenshotFlash? = nil
+    @Published var audioEnabled: Bool = true {
+        didSet { audioStream.setAudioEnabled(audioEnabled) }
+    }
 
     // Serial of the currently connected device, used for disconnect detection
     private var connectedSerial: String? = nil
@@ -48,6 +51,8 @@ final class ScrcpyManager: ObservableObject {
     let videoStream   = ScrcpyVideoStream()
     let audioStream   = ScrcpyAudioStream()
     let controlSocket = ScrcpyControlSocket()
+    let btManager     = BluetoothPairingManager()
+    let dataBridge    = DataBridgeClient()
 
     private let adbPath: String = {
         let candidates = [
@@ -311,6 +316,8 @@ final class ScrcpyManager: ObservableObject {
         log("──── Connected to \(deviceName) \(videoWidth)×\(videoHeight) ────", level: .ok)
         setupStatusBar()
         startBatteryPolling()
+        Task { await btManager.checkAndPair(adbPath: adbPath, serial: serial) }
+        await dataBridge.start(serial: serial, manager: self)
     }
 
     // MARK: - TCP Listener
@@ -397,6 +404,7 @@ final class ScrcpyManager: ObservableObject {
         serverTask = nil
         tcpListener?.cancel()
         tcpListener = nil
+        await dataBridge.stop()
         await videoStream.stop()
         await audioStream.stop()
         await controlSocket.stop()
@@ -407,6 +415,7 @@ final class ScrcpyManager: ObservableObject {
         connectedSerial = nil
         batteryLevel = nil
         batteryCharging = false
+        btManager.reset()
         log("Disconnected.", level: .ok)
     }
 

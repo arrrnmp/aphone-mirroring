@@ -25,6 +25,11 @@ extension NWConnection {
         return accumulated
     }
 
+    /// Reads between 1 and `maxLength` bytes — returns as soon as any bytes arrive.
+    func receiveAvailable(maxLength: Int) async throws -> Data {
+        return try await receiveSome(minimum: 1, maximum: maxLength)
+    }
+
     private func receiveSome(minimum: Int, maximum: Int) async throws -> Data {
         return try await withCheckedThrowingContinuation { continuation in
             receive(minimumIncompleteLength: minimum, maximumLength: maximum) { data, _, isComplete, error in
@@ -33,7 +38,7 @@ extension NWConnection {
                 } else if let data, !data.isEmpty {
                     continuation.resume(returning: data)
                 } else if isComplete {
-                    continuation.resume(throwing: NWError.posix(.ECONNRESET))
+                    continuation.resume(throwing: NWError.posix(.ECONNABORTED))
                 } else {
                     continuation.resume(returning: Data())
                 }

@@ -15,6 +15,13 @@ import SwiftUI
 import AppKit
 import AVFoundation
 
+// MARK: - Navigation notifications
+
+private extension NSNotification.Name {
+    /// Post to navigate the Messages tab to a specific phone number's thread.
+    static let navigateToSMS = NSNotification.Name("aphone.navigateToSMS")
+}
+
 // MARK: - ContentView (root)
 
 struct ContentView: View {
@@ -31,7 +38,7 @@ struct ContentView: View {
                 .frame(minWidth: 300, idealWidth: 360, maxWidth: 420)
 
             // ── Right: Content panel ──────────────────────────────────────────
-            ContentPanelView()
+            ContentPanelView(bridge: manager.dataBridge, btManager: manager.btManager)
                 .frame(maxWidth: .infinity)
                 .environment(auth)
         }
@@ -154,20 +161,6 @@ private struct PhonePanelView: View {
 
             Spacer()
 
-            // Device label
-            Group {
-                if manager.state == .connected, let name = manager.connectedDevice {
-                    Label(name, systemImage: "antenna.radiowaves.left.and.right")
-                        .lineLimit(1)
-                } else {
-                    Text("aPhone")
-                }
-            }
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.primary)
-
-            Spacer()
-
             // When popped out: only a retreat button stays in the main window.
             // Logs / Pin / Disconnect move to the popout window's overlay.
             if viewportIsPopped {
@@ -192,6 +185,15 @@ private struct PhonePanelView: View {
                         }
                         .glassEffectID("pin", in: titleBarNS)
                         if manager.state == .connected {
+                            ToolbarButton(
+                                icon: manager.audioEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                                help: manager.audioEnabled ? "Disable Audio" : "Enable Audio",
+                                tint: manager.audioEnabled ? nil : .orange
+                            ) {
+                                manager.audioEnabled.toggle()
+                            }
+                            .glassEffectID("audio", in: titleBarNS)
+                            .transition(.scale(scale: 0.8).combined(with: .opacity))
                             ToolbarButton(icon: "camera", help: "Screenshot") {
                                 manager.takeScreenshot()
                             }
@@ -509,17 +511,17 @@ private struct PhonePanelView: View {
             Spacer(minLength: 0)
             GlassEffectContainer(spacing: 8) {
                 HStack(spacing: 8) {
-                    // Navigation: Back / Home / Recents
-                    ctrlPill {
-                        ctrlButton("arrow.left",  "Back")    { manager.controlSocket.sendBackButton() }
-                        ctrlButton("house",        "Home")    { manager.controlSocket.sendHomeButton() }
-                        ctrlButton("square.stack", "Recents") { manager.controlSocket.sendAppSwitch() }
-                    }
                     // Audio: Volume Up / Down / Mute
                     ctrlPill {
                         ctrlButton("speaker.plus",  "Vol +") { manager.controlSocket.sendVolumeUp() }
                         ctrlButton("speaker.minus", "Vol −") { manager.controlSocket.sendVolumeDown() }
                         ctrlButton("speaker.slash", "Mute")  { manager.controlSocket.sendMute() }
+                    }
+                    // Navigation: Back / Home / Recents
+                    ctrlPill {
+                        ctrlButton("arrow.left",  "Back")    { manager.controlSocket.sendBackButton() }
+                        ctrlButton("house",        "Home")    { manager.controlSocket.sendHomeButton() }
+                        ctrlButton("square.stack", "Recents") { manager.controlSocket.sendAppSwitch() }
                     }
                     // Device: Power / Rotate
                     ctrlPill {
@@ -558,9 +560,12 @@ private struct PhonePanelView: View {
 
 private struct ContentPanelView: View {
 
+    @ObservedObject var bridge: DataBridgeClient
+    @ObservedObject var btManager: BluetoothPairingManager
     @Environment(AuthManager.self) private var auth
     @State private var selectedTab: PhoneTab = .messages
     @State private var sidebarWidth: CGFloat = 232
+    @State private var navigateSMSPhone: String? = nil
     @Namespace private var tabNS
 
     private static let bg = Color(white: 0.12)
@@ -571,6 +576,9 @@ private struct ContentPanelView: View {
             topTabBar
                 .padding(.top, 16)
                 .padding(.bottom, 12)
+
+            // Bluetooth pairing banner — shown until paired
+            btPairingBanner
 
             ZStack {
                 if !auth.isLocked {
@@ -588,6 +596,20 @@ private struct ContentPanelView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Self.bg.ignoresSafeArea())
+        // Switch to Messages tab and thread when a "navigate to SMS" action fires
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToSMS)) { notif in
+            let phone = notif.userInfo?["phone"] as? String
+            withAnimation(.smooth(duration: 0.28)) { selectedTab = .messages }
+            navigateSMSPhone = phone
+        }
+        // Show / dismiss the floating call window when an active call starts or ends
+        .onChange(of: bridge.activeCall) { _, call in
+            if let call {
+                CallWindowController.shared.show(call: call, bridge: bridge)
+            } else {
+                CallWindowController.shared.dismiss()
+            }
+        }
     }
 
     // MARK: - Top tab bar
@@ -632,23 +654,119 @@ private struct ContentPanelView: View {
         .animation(.smooth(duration: 0.28), value: selected)
     }
 
+    // MARK: - Bluetooth pairing banner
+
+    @ViewBuilder
+    private var btPairingBanner: some View {
+        switch btManager.status {
+        case .checking:
+            btBannerShell {
+                ProgressView().controlSize(.mini).tint(.secondary)
+                Text("Checking Bluetooth pairing…")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            }
+
+        case .notPaired(let name):
+            btBannerShell {
+                Image(systemName: "bluetooth")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pair \(name) via Bluetooth")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text("Required for routing call audio to your Mac")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    Task { await btManager.startPairing() }
+                } label: {
+                    Text("Pair Now")
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.accentColor.opacity(0.85)))
+                        .foregroundStyle(.white)
+                }
+                .buttonStyle(.plain)
+            }
+
+        case .pairing(let name):
+            btBannerShell {
+                ProgressView().controlSize(.mini).tint(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pairing with \(name)…")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text("Accept the pairing request on your phone")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+        case .unavailable(let msg):
+            btBannerShell {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.yellow)
+                Text(msg)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                Button {
+                    btManager.reset()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+
+        case .idle, .paired:
+            EmptyView()
+        }
+    }
+
+    private func btBannerShell<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        HStack(spacing: 8) { content() }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(white: 0.18).clipShape(RoundedRectangle(cornerRadius: 10)))
+            .padding(.horizontal, 12)
+            .padding(.bottom, 8)
+            .transition(.move(edge: .top).combined(with: .opacity))
+            .animation(.smooth(duration: 0.3), value: btManager.status == .paired)
+    }
+
     @ViewBuilder
     private var tabContent: some View {
         switch selectedTab {
-        case .messages: MessagesTabView(listWidth: $sidebarWidth)
-        case .photos:   PhotosTabView()
-        case .calls:    CallsTabView(listWidth: $sidebarWidth)
+        case .messages: MessagesTabView(listWidth: $sidebarWidth, bridge: bridge, navigateSMSPhone: $navigateSMSPhone)
+        case .photos:   PhotosTabView(bridge: bridge)
+        case .calls:    CallsTabView(listWidth: $sidebarWidth, bridge: bridge)
+        case .contacts: ContactsTabView(listWidth: $sidebarWidth, bridge: bridge)
         }
     }
 }
 
+
 // MARK: - PhoneTab
 
 private enum PhoneTab: CaseIterable {
-    case messages, photos, calls
+    case messages, photos, contacts, calls
 
     var title: String {
-        switch self { case .messages: "Messages"; case .photos: "Photos"; case .calls: "Calls" }
+        switch self {
+        case .messages: "Messages"
+        case .photos:   "Photos"
+        case .contacts: "Contacts"
+        case .calls:    "Calls"
+        }
     }
 }
 
@@ -704,88 +822,22 @@ private struct LockedView: View {
 
 // MARK: - Messages tab
 
-private struct FakeThread: Identifiable {
-    let id = UUID()
-    let name: String
-    let preview: String
-    let time: String
-    let unread: Int
-    let initials: String
-    let hue: Double
-}
-
-private struct FakeMessage: Identifiable {
-    let id = UUID()
-    let text: String
-    let isFromMe: Bool
-    let time: String
-}
-
-private let fakeThreads: [FakeThread] = [
-    .init(name: "Mom",           preview: "Are you coming for dinner tonight? 😊", time: "2m",        unread: 2, initials: "M",  hue: 0.93),
-    .init(name: "Alex Chen",     preview: "The meeting is pushed to 3 pm",          time: "14m",       unread: 0, initials: "AC", hue: 0.60),
-    .init(name: "Work Group",    preview: "Jake: I sent the files over",             time: "1h",        unread: 5, initials: "WG", hue: 0.36),
-    .init(name: "Sarah K.",      preview: "Thanks! See you Saturday 😊",            time: "2h",        unread: 0, initials: "SK", hue: 0.75),
-    .init(name: "David",         preview: "Can you grab milk on the way home?",     time: "3h",        unread: 0, initials: "D",  hue: 0.08),
-    .init(name: "Olivia",        preview: "📷 Photo",                               time: "Yesterday", unread: 1, initials: "O",  hue: 0.50),
-    .init(name: "Restaurant 🍜", preview: "You: Sounds great! 7 pm works",          time: "Yesterday", unread: 0, initials: "R",  hue: 0.17),
-    .init(name: "Michael T.",    preview: "Let me know when you land",              time: "Mon",       unread: 0, initials: "MT", hue: 0.55),
-    .init(name: "Emma",          preview: "Did you see the game? 🏀",              time: "Mon",       unread: 0, initials: "E",  hue: 0.28),
-]
-
-private func fakeConversation(for thread: FakeThread) -> [FakeMessage] {
-    switch thread.name {
-    case "Mom":
-        return [
-            .init(text: "Hey! How are you doing?",               isFromMe: false, time: "10:42 AM"),
-            .init(text: "All good! Busy with work 😅",           isFromMe: true,  time: "10:44 AM"),
-            .init(text: "Are you coming for dinner tonight? 😊", isFromMe: false, time: "10:58 AM"),
-        ]
-    case "Alex Chen":
-        return [
-            .init(text: "Hey, when's the team sync?",            isFromMe: true,  time: "2:12 PM"),
-            .init(text: "The meeting is pushed to 3 pm",         isFromMe: false, time: "2:18 PM"),
-        ]
-    case "Work Group":
-        return [
-            .init(text: "Did everyone review the doc?",          isFromMe: true,  time: "9:00 AM"),
-            .init(text: "Yes, leaving comments now",             isFromMe: false, time: "9:15 AM"),
-            .init(text: "Jake: I sent the files over",           isFromMe: false, time: "9:20 AM"),
-        ]
-    case "Sarah K.":
-        return [
-            .init(text: "Still on for Saturday?",                isFromMe: true,  time: "2h ago"),
-            .init(text: "Thanks! See you Saturday 😊",           isFromMe: false, time: "2h ago"),
-        ]
-    case "David":
-        return [
-            .init(text: "Heading home soon",                     isFromMe: true,  time: "3h ago"),
-            .init(text: "Can you grab milk on the way home?",   isFromMe: false, time: "3h ago"),
-        ]
-    case "Olivia":
-        return [
-            .init(text: "Check this out!",                       isFromMe: false, time: "Yesterday"),
-            .init(text: "📷 Photo",                              isFromMe: false, time: "Yesterday"),
-        ]
-    default:
-        return [.init(text: thread.preview, isFromMe: false, time: thread.time)]
-    }
-}
-
 private struct MessagesTabView: View {
     @Binding var listWidth: CGFloat
-    @State private var selectedThread: FakeThread? = fakeThreads.first
+    @ObservedObject var bridge: DataBridgeClient
+    @Binding var navigateSMSPhone: String?
+    @State private var selectedThread: BridgeThread? = nil
+    @State private var pendingPhone: String? = nil   // non-nil → show NewConversationPanel
     @State private var searchText = ""
 
     private let minListWidth: CGFloat = 160
     private let maxListWidth: CGFloat = 340
-    // Minimum width reserved for the right panel so the sidebar never crowds it out.
     private let minContentWidth: CGFloat = 220
 
-    private var filteredThreads: [FakeThread] {
-        guard !searchText.isEmpty else { return fakeThreads }
-        return fakeThreads.filter {
-            $0.name.localizedCaseInsensitiveContains(searchText) ||
+    private var filteredThreads: [BridgeThread] {
+        guard !searchText.isEmpty else { return bridge.threads }
+        return bridge.threads.filter {
+            $0.contactName.localizedCaseInsensitiveContains(searchText) ||
             $0.preview.localizedCaseInsensitiveContains(searchText)
         }
     }
@@ -796,23 +848,43 @@ private struct MessagesTabView: View {
             ThreadListPanel(
                 threads: filteredThreads,
                 selectedThread: $selectedThread,
-                searchText: $searchText
+                searchText: $searchText,
+                onCompose: {
+                    withAnimation(.smooth(duration: 0.2)) {
+                        selectedThread = nil
+                        pendingPhone = ""
+                    }
+                }
             )
             .frame(width: listWidth)
             .frame(maxHeight: .infinity)
             .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(white: 0.17)))
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-            // Drag-to-resize handle
-            PanelResizeDivider(width: $listWidth,
-                               minWidth: minListWidth,
-                               maxWidth: maxListWidth)
+            PanelResizeDivider(width: $listWidth, minWidth: minListWidth, maxWidth: maxListWidth)
 
-            // Right panel — conversation detail
+            // Right panel — conversation detail or new conversation
             Group {
-                if let thread = selectedThread {
-                    ConversationPanel(thread: thread)
-                        .id(thread.id)
+                if let phone = pendingPhone {
+                    NewConversationPanel(
+                        initialPhone: phone,
+                        bridge: bridge,
+                        onSent: {
+                            // Called after sending — clear pending (new_sms event will refresh threads)
+                            pendingPhone = nil
+                        },
+                        onCancel: {
+                            withAnimation(.smooth(duration: 0.2)) { pendingPhone = nil }
+                        }
+                    )
+                    .id("pending-\(phone)")
+                } else if let thread = selectedThread {
+                    ConversationPanel(
+                        thread: thread,
+                        messages: bridge.messages[thread.threadId] ?? [],
+                        bridge: bridge
+                    )
+                    .id(thread.threadId)
                 } else {
                     noSelectionPlaceholder
                 }
@@ -823,25 +895,69 @@ private struct MessagesTabView: View {
         }
         .padding(10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // Clamp the stored sidebar width whenever the panel itself resizes.
         .onGeometryChange(for: CGFloat.self, of: \.size.width) { totalWidth in
             let maxAllowed = min(maxListWidth, totalWidth - minContentWidth - 20)
-            if listWidth > maxAllowed {
-                listWidth = max(minListWidth, maxAllowed)
+            if listWidth > maxAllowed { listWidth = max(minListWidth, maxAllowed) }
+        }
+        // When a thread is selected, dismiss compose panel and fetch messages
+        .onChange(of: selectedThread?.threadId) { _, threadId in
+            if let id = threadId {
+                if pendingPhone != nil { pendingPhone = nil }
+                bridge.fetchMessages(threadId: id)
+                bridge.markRead(threadId: id)
             }
         }
+        // Auto-select first thread once data loads (only when no pending compose)
+        .onChange(of: bridge.threads) { _, threads in
+            if selectedThread == nil, pendingPhone == nil, let first = threads.first {
+                selectedThread = first
+            }
+        }
+        // Navigate to thread when arriving from another tab (binding set before view appears)
+        .onAppear { applyNavigateSMS(navigateSMSPhone) }
+        .onChange(of: navigateSMSPhone) { _, phone in applyNavigateSMS(phone) }
     }
 
     private var noSelectionPlaceholder: some View {
         VStack(spacing: 12) {
-            Image(systemName: "message")
-                .font(.system(size: 32, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("Select a conversation")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+            if bridge.isLoading {
+                ProgressView()
+                    .controlSize(.regular)
+            } else if bridge.threads.isEmpty {
+                Image(systemName: "message")
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text(bridge.isConnected ? "No messages" : "Connect your phone to view messages")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            } else {
+                Image(systemName: "message")
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text("Select a conversation")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func applyNavigateSMS(_ phone: String?) {
+        guard let phone, !phone.isEmpty else { return }
+        navigateSMSPhone = nil   // consume so repeat taps re-trigger onChange
+        let digits = phone.filter(\.isNumber)
+        if let match = bridge.threads.first(where: { $0.contactPhone.filter(\.isNumber) == digits }) {
+            withAnimation(.smooth(duration: 0.2)) {
+                selectedThread = match
+                pendingPhone = nil
+            }
+        } else {
+            withAnimation(.smooth(duration: 0.2)) {
+                selectedThread = nil
+                pendingPhone = phone
+            }
+        }
     }
 }
 
@@ -879,34 +995,46 @@ private struct PanelResizeDivider: View {
 // MARK: Thread list panel
 
 private struct ThreadListPanel: View {
-    let threads: [FakeThread]
-    @Binding var selectedThread: FakeThread?
+    let threads: [BridgeThread]
+    @Binding var selectedThread: BridgeThread?
     @Binding var searchText: String
+    let onCompose: () -> Void
 
     var body: some View {
         VStack(spacing: 8) {
-            // Search bar — plain fill inside glass panel (avoid glass-on-glass)
+            // Search bar + compose button row
             HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                TextField("Search", text: $searchText)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 13))
-                if !searchText.isEmpty {
-                    Button { searchText = "" } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    TextField("Search", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13))
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(.white.opacity(0.08))
+                )
+                Button(action: onCompose) {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("New Message")
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(.white.opacity(0.08))
-            )
 
             ScrollView(.vertical, showsIndicators: false) {
                 VStack(spacing: 2) {
@@ -926,7 +1054,7 @@ private struct ThreadListPanel: View {
 }
 
 private struct ThreadRow: View {
-    let thread: FakeThread
+    let thread: BridgeThread
     let isSelected: Bool
     let action: () -> Void
 
@@ -944,11 +1072,11 @@ private struct ThreadRow: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(alignment: .firstTextBaseline) {
-                        Text(thread.name)
-                            .font(.system(size: 13, weight: thread.unread > 0 ? .semibold : .medium))
+                        Text(thread.contactName)
+                            .font(.system(size: 13, weight: thread.unreadCount > 0 ? .semibold : .medium))
                             .lineLimit(1)
                         Spacer()
-                        Text(thread.time)
+                        Text(thread.timeLabel)
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -958,10 +1086,10 @@ private struct ThreadRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         Spacer()
-                        if thread.unread > 0 {
+                        if thread.unreadCount > 0 {
                             ZStack {
                                 Circle().fill(Color.accentColor).frame(width: 18, height: 18)
-                                Text("\(thread.unread)")
+                                Text("\(thread.unreadCount)")
                                     .font(.system(size: 10, weight: .bold))
                                     .foregroundStyle(.white)
                             }
@@ -985,10 +1113,10 @@ private struct ThreadRow: View {
 // MARK: Conversation panel
 
 private struct ConversationPanel: View {
-    let thread: FakeThread
+    let thread: BridgeThread
+    let messages: [BridgeMessage]
+    let bridge: DataBridgeClient
     @State private var draftText = ""
-
-    private var messages: [FakeMessage] { fakeConversation(for: thread) }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -998,10 +1126,16 @@ private struct ConversationPanel: View {
 
             ScrollViewReader { proxy in
                 ScrollView(.vertical, showsIndicators: false) {
-                    VStack(spacing: 6) {
-                        ForEach(messages) { msg in
-                            MessageBubble(message: msg)
-                                .id(msg.id)
+                    VStack(spacing: 0) {
+                        ForEach(groupedByDay(messages), id: \.0) { dayLabel, dayMessages in
+                            DayDivider(label: dayLabel)
+                            VStack(spacing: 6) {
+                                ForEach(dayMessages) { msg in
+                                    MessageBubble(message: msg)
+                                        .id(msg.messageId)
+                                }
+                            }
+                            .padding(.bottom, 6)
                         }
                     }
                     .padding(.horizontal, 14)
@@ -1009,7 +1143,12 @@ private struct ConversationPanel: View {
                 }
                 .onAppear {
                     if let last = messages.last {
-                        proxy.scrollTo(last.id, anchor: .bottom)
+                        proxy.scrollTo(last.messageId, anchor: .bottom)
+                    }
+                }
+                .onChange(of: messages.count) { _, _ in
+                    if let last = messages.last {
+                        withAnimation { proxy.scrollTo(last.messageId, anchor: .bottom) }
                     }
                 }
             }
@@ -1031,7 +1170,7 @@ private struct ConversationPanel: View {
                     .foregroundStyle(.white)
             }
             .frame(width: 48, height: 48)
-            Text(thread.name)
+            Text(thread.contactName)
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.primary)
         }
@@ -1052,7 +1191,10 @@ private struct ConversationPanel: View {
                         .fill(.white.opacity(0.08))
                 )
             if !draftText.isEmpty {
-                Button { draftText = "" } label: {
+                Button {
+                    bridge.sendSMS(to: thread.contactPhone, body: draftText)
+                    draftText = ""
+                } label: {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 26))
                         .foregroundStyle(Color.accentColor)
@@ -1067,14 +1209,98 @@ private struct ConversationPanel: View {
     }
 }
 
+// MARK: New conversation (no existing thread)
+
+private struct NewConversationPanel: View {
+    let initialPhone: String
+    let bridge: DataBridgeClient
+    let onSent: () -> Void
+    let onCancel: () -> Void
+
+    @State private var recipientPhone: String
+    @State private var draftText = ""
+
+    init(initialPhone: String, bridge: DataBridgeClient,
+         onSent: @escaping () -> Void, onCancel: @escaping () -> Void) {
+        self.initialPhone = initialPhone
+        self.bridge = bridge
+        self.onSent = onSent
+        self.onCancel = onCancel
+        self._recipientPhone = State(initialValue: initialPhone)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // To: field + cancel button
+            HStack(spacing: 8) {
+                Text("To:")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                TextField("Phone number", text: $recipientPhone)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                Button(action: onCancel) {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+
+            Divider().opacity(0.1)
+
+            Spacer()
+
+            Text("No messages yet")
+                .font(.system(size: 14))
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Divider().opacity(0.1)
+
+            // Input bar
+            HStack(spacing: 8) {
+                TextField("Text Message", text: $draftText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Capsule().fill(.white.opacity(0.08)))
+                if !draftText.isEmpty {
+                    Button {
+                        let phone = recipientPhone.trimmingCharacters(in: .whitespaces)
+                        guard !phone.isEmpty else { return }
+                        bridge.sendSMS(to: phone, body: draftText)
+                        draftText = ""
+                        onSent()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 26))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.scale.combined(with: .opacity))
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .animation(.smooth(duration: 0.2), value: draftText.isEmpty)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct MessageBubble: View {
-    let message: FakeMessage
+    let message: BridgeMessage
 
     var body: some View {
         HStack {
             if message.isFromMe { Spacer(minLength: 40) }
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 2) {
-                Text(message.text)
+                Text(message.body)
                     .font(.system(size: 13))
                     .foregroundStyle(message.isFromMe ? .white : .primary)
                     .padding(.horizontal, 12)
@@ -1083,7 +1309,7 @@ private struct MessageBubble: View {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .fill(message.isFromMe ? Color.blue : Color.white.opacity(0.12))
                     )
-                Text(message.time)
+                Text(message.timeLabel)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
@@ -1094,27 +1320,101 @@ private struct MessageBubble: View {
     }
 }
 
+private struct DayDivider: View {
+    let label: String
+    var body: some View {
+        HStack(spacing: 8) {
+            Rectangle().fill(Color.primary.opacity(0.1)).frame(height: 1)
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .fixedSize()
+            Rectangle().fill(Color.primary.opacity(0.1)).frame(height: 1)
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+/// Groups an array of messages into (dayLabel, messages) sections.
+private func groupedByDay(_ messages: [BridgeMessage]) -> [(String, [BridgeMessage])] {
+    var groups: [(String, [BridgeMessage])] = []
+    var currentLabel: String?
+    var currentGroup: [BridgeMessage] = []
+
+    for msg in messages {
+        let label = messageDayLabel(epochMillis: msg.timestamp)
+        if label != currentLabel {
+            if let current = currentLabel, !currentGroup.isEmpty {
+                groups.append((current, currentGroup))
+            }
+            currentLabel = label
+            currentGroup = [msg]
+        } else {
+            currentGroup.append(msg)
+        }
+    }
+    if let current = currentLabel, !currentGroup.isEmpty {
+        groups.append((current, currentGroup))
+    }
+    return groups
+}
+
+private func messageDayLabel(epochMillis: Double) -> String {
+    let date = Date(timeIntervalSince1970: epochMillis / 1000.0)
+    let cal = Calendar.current
+    if cal.isDateInToday(date)     { return "Today" }
+    if cal.isDateInYesterday(date) { return "Yesterday" }
+    let daysAgo = cal.dateComponents([.day], from: date, to: Date()).day ?? 0
+    if daysAgo < 7 {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "EEEE"
+        return fmt.string(from: date)
+    }
+    let fmt = DateFormatter()
+    fmt.dateStyle = .medium
+    fmt.timeStyle = .none
+    return fmt.string(from: date)
+}
+
 // MARK: - Photos tab
 
 private struct PhotosTabView: View {
-    // Adaptive columns: fills available width, each cell between 130–240 pt.
-    // More columns when wide, fewer when narrow — never outside the size bounds.
+    @ObservedObject var bridge: DataBridgeClient
     private let columns = [GridItem(.adaptive(minimum: 130, maximum: 240), spacing: 8)]
 
-    private let items: [(hue: Double, label: String)] = (0..<25).map { i in
-        let labels = ["Beach", "Family", "Sunset", "City", "Dog", "Food", "Hike",
-                      "Concert", "Birthday", "Coffee", "Garden", "Road Trip"]
-        return (hue: Double(i) / 25.0, label: labels[i % labels.count])
-    }
-
     var body: some View {
-        ScrollView(.vertical, showsIndicators: false) {
-            LazyVGrid(columns: columns, spacing: 8) {
-                ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                    PhotoCell(hue: item.hue, label: item.label)
+        Group {
+            if bridge.photos.isEmpty {
+                VStack(spacing: 12) {
+                    if bridge.isLoading {
+                        ProgressView().controlSize(.regular)
+                    } else {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.system(size: 32, weight: .light))
+                            .foregroundStyle(.secondary)
+                        Text(bridge.isConnected ? "No photos" : "Connect your phone to view photos")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView(.vertical, showsIndicators: false) {
+                    LazyVGrid(columns: columns, spacing: 8) {
+                        ForEach(bridge.photos) { photo in
+                            PhotoCell(photo: photo, bridge: bridge)
+                        }
+                        // Sentinel: when this appears in the viewport, load the next page
+                        if bridge.photosHasMore {
+                            Color.clear
+                                .aspectRatio(1, contentMode: .fit)
+                                .onAppear { bridge.loadMorePhotos() }
+                        }
+                    }
+                    .padding(12)
                 }
             }
-            .padding(12)
         }
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(white: 0.17)))
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -1124,94 +1424,59 @@ private struct PhotosTabView: View {
 }
 
 private struct PhotoCell: View {
-    let hue: Double
-    let label: String
+    let photo: BridgePhoto
+    let bridge: DataBridgeClient
 
     var body: some View {
-        Button(action: openInPreview) {
+        Button { bridge.openFullPhoto(mediaId: photo.mediaId) } label: {
+            // Rectangle with aspectRatio(1) is the reliable way to get square cells in LazyVGrid
             Rectangle()
-                .fill(Color(hue: hue, saturation: 0.55, brightness: 0.58))
-                .overlay(alignment: .bottomLeading) {
-                    Text(label)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.85))
-                        .padding(6)
+                .fill(Color(white: 0.22))
+                .aspectRatio(1, contentMode: .fit)
+                .overlay {
+                    if let img = photo.thumbnailImage {
+                        Image(nsImage: img)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
+                        Image(systemName: "photo")
+                            .foregroundStyle(.secondary.opacity(0.4))
+                    }
                 }
-                .aspectRatio(1, contentMode: .fill)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(alignment: .bottomTrailing) {
+                    if photo.localURL != nil {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 13, weight: .semibold))
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, Color.green.opacity(0.85))
+                            .padding(5)
+                    }
+                }
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
         .buttonStyle(.plain)
         .onHover { hovering in
             if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
         }
-    }
-
-    private func openInPreview() {
-        let side: CGFloat = 800
-        let nsColor = NSColor(hue: hue, saturation: 0.55, brightness: 0.58, alpha: 1)
-        let image = NSImage(size: CGSize(width: side, height: side), flipped: false) { rect in
-            nsColor.setFill()
-            rect.fill()
-            let attrs: [NSAttributedString.Key: Any] = [
-                .foregroundColor: NSColor.white.withAlphaComponent(0.9),
-                .font: NSFont.boldSystemFont(ofSize: 64),
-            ]
-            let str = label as NSString
-            let sz  = str.size(withAttributes: attrs)
-            str.draw(at: CGPoint(x: (rect.width - sz.width) / 2,
-                                 y: (rect.height - sz.height) / 2),
-                     withAttributes: attrs)
-            return true
-        }
-        guard let tiff = image.tiffRepresentation,
-              let rep  = NSBitmapImageRep(data: tiff),
-              let png  = rep.representation(using: .png, properties: [:]) else { return }
-        let url = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("photo_\(label)_\(Int(hue * 10000)).png")
-        try? png.write(to: url)
-        NSWorkspace.shared.open(url)
+        .onAppear { bridge.fetchThumbnail(mediaId: photo.mediaId) }
     }
 }
 
 // MARK: - Calls tab
 
-private enum FakeCallDir { case incoming, outgoing, missed }
-
-private struct FakeCallRecord: Identifiable {
-    let id = UUID()
-    let name: String
-    let dir: FakeCallDir
-    let duration: String?
-    let time: String
-    let initials: String
-    let hue: Double
-}
-
-private let fakeCalls: [FakeCallRecord] = [
-    .init(name: "Mom",        dir: .incoming, duration: "12m 34s", time: "Just now",   initials: "M",  hue: 0.93),
-    .init(name: "Alex Chen",  dir: .outgoing, duration: "4m 20s",  time: "14m ago",    initials: "AC", hue: 0.60),
-    .init(name: "Unknown",    dir: .missed,   duration: nil,        time: "1h ago",     initials: "?",  hue: 0.00),
-    .init(name: "David",      dir: .incoming, duration: "28m 2s",  time: "2h ago",     initials: "D",  hue: 0.08),
-    .init(name: "Work",       dir: .outgoing, duration: "1m 11s",  time: "Yesterday",  initials: "W",  hue: 0.36),
-    .init(name: "Sarah K.",   dir: .missed,   duration: nil,        time: "Yesterday",  initials: "SK", hue: 0.75),
-    .init(name: "Olivia",     dir: .incoming, duration: "47m 08s", time: "Mon",        initials: "O",  hue: 0.50),
-    .init(name: "Emma",       dir: .outgoing, duration: "6m 55s",  time: "Mon",        initials: "E",  hue: 0.28),
-    .init(name: "Mom",        dir: .missed,   duration: nil,        time: "Sun",        initials: "M",  hue: 0.93),
-    .init(name: "Alex Chen",  dir: .incoming, duration: "1m 03s",  time: "Sun",        initials: "AC", hue: 0.60),
-]
-
 private struct CallsTabView: View {
     @Binding var listWidth: CGFloat
-    @State private var selectedCall: FakeCallRecord? = fakeCalls.first
+    @ObservedObject var bridge: DataBridgeClient
+    @State private var selectedCall: BridgeCall? = nil
     @State private var searchText = ""
 
     private let minListWidth: CGFloat = 160
     private let maxListWidth: CGFloat = 340
     private let minContentWidth: CGFloat = 220
 
-    private var filteredCalls: [FakeCallRecord] {
-        guard !searchText.isEmpty else { return fakeCalls }
-        return fakeCalls.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+    private var filteredCalls: [BridgeCall] {
+        guard !searchText.isEmpty else { return bridge.calls }
+        return bridge.calls.filter { $0.displayName.localizedCaseInsensitiveContains(searchText) }
     }
 
     var body: some View {
@@ -1230,8 +1495,8 @@ private struct CallsTabView: View {
 
             Group {
                 if let call = selectedCall {
-                    ContactDetailPanel(call: call)
-                        .id(call.name)
+                    ContactDetailPanel(call: call, allCalls: bridge.calls, bridge: bridge)
+                        .id(call.callId)
                 } else {
                     noSelectionView
                 }
@@ -1244,20 +1509,28 @@ private struct CallsTabView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onGeometryChange(for: CGFloat.self, of: \.size.width) { totalWidth in
             let maxAllowed = min(maxListWidth, totalWidth - minContentWidth - 20)
-            if listWidth > maxAllowed {
-                listWidth = max(minListWidth, maxAllowed)
-            }
+            if listWidth > maxAllowed { listWidth = max(minListWidth, maxAllowed) }
+        }
+        .onChange(of: bridge.calls) { _, calls in
+            if selectedCall == nil, let first = calls.first { selectedCall = first }
         }
     }
 
     private var noSelectionView: some View {
         VStack(spacing: 12) {
-            Image(systemName: "phone")
-                .font(.system(size: 32, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("Select a contact")
-                .font(.system(size: 14))
-                .foregroundStyle(.secondary)
+            if bridge.isLoading {
+                ProgressView().controlSize(.regular)
+            } else {
+                Image(systemName: "phone")
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text(bridge.calls.isEmpty && !bridge.isConnected
+                     ? "Connect your phone to view calls"
+                     : "Select a contact")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -1266,8 +1539,8 @@ private struct CallsTabView: View {
 // MARK: Call list panel
 
 private struct CallListPanel: View {
-    let calls: [FakeCallRecord]
-    @Binding var selectedCall: FakeCallRecord?
+    let calls: [BridgeCall]
+    @Binding var selectedCall: BridgeCall?
     @Binding var searchText: String
 
     var body: some View {
@@ -1312,24 +1585,9 @@ private struct CallListPanel: View {
 }
 
 private struct CallRow: View {
-    let call: FakeCallRecord
+    let call: BridgeCall
     let isSelected: Bool
     let action: () -> Void
-
-    private var dirIcon: String {
-        switch call.dir {
-        case .incoming: "phone.arrow.down.left"
-        case .outgoing: "phone.arrow.up.right"
-        case .missed:   "phone.arrow.down.left"
-        }
-    }
-    private var dirColor: Color {
-        switch call.dir {
-        case .incoming: .green
-        case .outgoing: Color.accentColor
-        case .missed:   .red
-        }
-    }
 
     var body: some View {
         Button(action: action) {
@@ -1344,17 +1602,16 @@ private struct CallRow: View {
                 .frame(width: 40, height: 40)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(call.name)
-                        .font(.system(size: 13,
-                                      weight: call.dir == .missed ? .semibold : .medium))
-                        .foregroundStyle(call.dir == .missed ? .red : .primary)
+                    Text(call.displayName)
+                        .font(.system(size: 13, weight: call.isMissed ? .semibold : .medium))
+                        .foregroundStyle(call.isMissed ? .red : .primary)
                         .lineLimit(1)
 
                     HStack(spacing: 4) {
-                        Image(systemName: dirIcon)
+                        Image(systemName: call.isOutgoing ? "phone.arrow.up.right" : "phone.arrow.down.left")
                             .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(dirColor)
-                        if let dur = call.duration {
+                            .foregroundStyle(call.isMissed ? .red : call.isOutgoing ? Color.accentColor : .green)
+                        if let dur = call.durationLabel {
                             Text(dur).font(.system(size: 12)).foregroundStyle(.secondary)
                         } else {
                             Text("Missed").font(.system(size: 12)).foregroundStyle(.red.opacity(0.8))
@@ -1364,7 +1621,7 @@ private struct CallRow: View {
 
                 Spacer()
 
-                Text(call.time)
+                Text(call.timeLabel)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
@@ -1384,12 +1641,15 @@ private struct CallRow: View {
 // MARK: Contact detail panel
 
 private struct ContactDetailPanel: View {
-    let call: FakeCallRecord
+    let call: BridgeCall
+    let allCalls: [BridgeCall]
+    let bridge: DataBridgeClient
     @State private var detailTab = 0
+    @State private var showMessageMenu = false
     @Namespace private var detailNS
 
-    private var recentCalls: [FakeCallRecord] {
-        fakeCalls.filter { $0.name == call.name }
+    private var recentCalls: [BridgeCall] {
+        allCalls.filter { $0.displayName == call.displayName }
     }
 
     var body: some View {
@@ -1423,7 +1683,7 @@ private struct ContactDetailPanel: View {
                             radius: 20, x: 0, y: 8
                         )
 
-                        Text(call.name)
+                        Text(call.displayName)
                             .font(.system(size: 22, weight: .bold))
                             .foregroundStyle(.primary)
                     }
@@ -1431,12 +1691,12 @@ private struct ContactDetailPanel: View {
                     .padding(.top, 28)
                     .padding(.bottom, 24)
 
-                    // ── Action buttons — Liquid Glass circles (interactive controls) ──
+                    // ── Action buttons — Message (SMS) · Call · More ──
                     GlassEffectContainer(spacing: 16) {
                         HStack(spacing: 16) {
-                            actionButton(icon: "message.fill", label: "Message")
-                            actionButton(icon: "phone.fill",   label: "Call")
-                            actionButton(icon: "video.fill",   label: "Video")
+                            smsActionButton
+                            callActionButton
+                            moreActionButton
                         }
                     }
                     .padding(.bottom, 26)
@@ -1469,19 +1729,63 @@ private struct ContactDetailPanel: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    // Glass circle button — icon is the interactive element, label sits outside
-    private func actionButton(icon: String, label: String) -> some View {
+    // SMS button — opens the in-app SMS conversation directly
+    private var smsActionButton: some View {
         VStack(spacing: 7) {
-            Button { } label: {
-                Image(systemName: icon)
+            Button {
+                NotificationCenter.default.post(
+                    name: .navigateToSMS, object: nil, userInfo: ["phone": call.number]
+                )
+            } label: {
+                Image(systemName: "message.fill")
                     .font(.system(size: 18, weight: .medium))
                     .frame(width: 52, height: 52)
                     .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .glassEffect(.regular.interactive(), in: Circle())
+            Text("Message")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+    }
 
-            Text(label)
+    // Call button — directly initiates the call
+    private var callActionButton: some View {
+        VStack(spacing: 7) {
+            Button { bridge.placeCall(call.number) } label: {
+                Image(systemName: "phone.fill")
+                    .font(.system(size: 18, weight: .medium))
+                    .frame(width: 52, height: 52)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: Circle())
+            Text("Call")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // More button — shows all third-party app options (WhatsApp, Signal, etc.)
+    private var moreActionButton: some View {
+        VStack(spacing: 7) {
+            Button {
+                bridge.fetchContactApps(phone: call.number, name: call.displayName)
+                showMessageMenu.toggle()
+            } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 18, weight: .medium))
+                    .frame(width: 52, height: 52)
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .glassEffect(.regular.interactive(), in: Circle())
+            .popover(isPresented: $showMessageMenu, arrowEdge: .bottom) {
+                AppActionsMenu(phone: call.number, bridge: bridge,
+                               onDismiss: { showMessageMenu = false })
+            }
+            Text("Other")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(.secondary)
         }
@@ -1506,11 +1810,9 @@ private struct ContactDetailPanel: View {
 
     private var detailsSection: some View {
         VStack(spacing: 0) {
-            detailRow(icon: "phone",    label: "Mobile",    value: fakePhone())
+            detailRow(icon: "phone", label: "Mobile", value: call.number)
             Divider().opacity(0.1).padding(.leading, 42)
-            detailRow(icon: "clock",    label: "Last call", value: call.time)
-            Divider().opacity(0.1).padding(.leading, 42)
-            detailRow(icon: "envelope", label: "Email",     value: fakeEmail())
+            detailRow(icon: "clock", label: "Last call", value: call.timeLabel)
         }
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -1551,38 +1853,535 @@ private struct ContactDetailPanel: View {
         .padding(.vertical, 10)
     }
 
-    private func recentCallRow(_ rec: FakeCallRecord) -> some View {
+    private func recentCallRow(_ rec: BridgeCall) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: rec.dir == .outgoing ? "phone.arrow.up.right"
-                                                   : "phone.arrow.down.left")
+            Image(systemName: rec.isOutgoing ? "phone.arrow.up.right"
+                                             : "phone.arrow.down.left")
                 .font(.system(size: 12))
-                .foregroundStyle(rec.dir == .missed ? .red
-                                 : rec.dir == .outgoing ? Color.accentColor : .green)
+                .foregroundStyle(rec.isMissed   ? .red
+                                 : rec.isOutgoing ? Color.accentColor : .green)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 1) {
-                Text(rec.dir == .missed   ? "Missed"
-                     : rec.dir == .outgoing ? "Outgoing" : "Incoming")
+                Text(rec.isMissed ? "Missed" : rec.isOutgoing ? "Outgoing" : "Incoming")
                     .font(.system(size: 13))
-                    .foregroundStyle(rec.dir == .missed ? .red : .primary)
-                if let dur = rec.duration {
+                    .foregroundStyle(rec.isMissed ? .red : .primary)
+                if let dur = rec.durationLabel {
                     Text(dur).font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
             Spacer()
-            Text(rec.time)
+            Text(rec.timeLabel)
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
+}
 
-    private func fakePhone() -> String {
-        let n = Int(call.hue * 1000)
-        return "+1 (\(500 + n % 500)) \(100 + n % 900)-\(1000 + n % 9000)"
+// MARK: - Contacts tab
+
+private struct ContactsTabView: View {
+    @Binding var listWidth: CGFloat
+    @ObservedObject var bridge: DataBridgeClient
+    @State private var selectedContact: BridgeContact? = nil
+    @State private var searchText = ""
+
+    private let minListWidth: CGFloat = 160
+    private let maxListWidth: CGFloat = 340
+    private let minContentWidth: CGFloat = 220
+
+    private var filteredContacts: [BridgeContact] {
+        guard !searchText.isEmpty else { return bridge.contacts }
+        return bridge.contacts.filter {
+            $0.displayName.localizedCaseInsensitiveContains(searchText) ||
+            $0.phoneNumbers.contains { $0.localizedCaseInsensitiveContains(searchText) }
+        }
     }
-    private func fakeEmail() -> String {
-        "\(call.name.lowercased().replacingOccurrences(of: " ", with: "."))@icloud.com"
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ContactListPanel(
+                contacts: filteredContacts,
+                selectedContact: $selectedContact,
+                searchText: $searchText
+            )
+            .frame(width: listWidth)
+            .frame(maxHeight: .infinity)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(white: 0.17)))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            PanelResizeDivider(width: $listWidth, minWidth: minListWidth, maxWidth: maxListWidth)
+
+            Group {
+                if let contact = selectedContact {
+                    ContactInfoPanel(contact: contact, bridge: bridge)
+                        .id(contact.contactId)
+                } else {
+                    noSelectionView
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color(white: 0.17)))
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onGeometryChange(for: CGFloat.self, of: \.size.width) { totalWidth in
+            let maxAllowed = min(maxListWidth, totalWidth - minContentWidth - 20)
+            if listWidth > maxAllowed { listWidth = max(minListWidth, maxAllowed) }
+        }
+        .onChange(of: bridge.contacts) { _, contacts in
+            if selectedContact == nil, let first = contacts.first { selectedContact = first }
+        }
+    }
+
+    private var noSelectionView: some View {
+        VStack(spacing: 12) {
+            if bridge.isLoading {
+                ProgressView().controlSize(.regular)
+            } else {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 32, weight: .light))
+                    .foregroundStyle(.secondary)
+                Text(bridge.contacts.isEmpty && !bridge.isConnected
+                     ? "Connect your phone to view contacts"
+                     : "Select a contact")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct ContactListPanel: View {
+    let contacts: [BridgeContact]
+    @Binding var selectedContact: BridgeContact?
+    @Binding var searchText: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                TextField("Search", text: $searchText)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 13))
+                if !searchText.isEmpty {
+                    Button { searchText = "" } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(.white.opacity(0.08)))
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 2) {
+                    ForEach(contacts) { contact in
+                        ContactRow(
+                            contact: contact,
+                            isSelected: selectedContact?.id == contact.id
+                        ) {
+                            withAnimation(.smooth(duration: 0.2)) { selectedContact = contact }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(10)
+    }
+}
+
+private struct ContactRow: View {
+    let contact: BridgeContact
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle().fill(Color(hue: contact.hue, saturation: 0.6, brightness: 0.75))
+                    Text(contact.initials)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 40, height: 40)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(contact.displayName)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    if let phone = contact.phoneNumbers.first {
+                        Text(phone)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? Color.accentColor.opacity(0.15) : .clear)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .animation(.smooth(duration: 0.15), value: isSelected)
+    }
+}
+
+private struct ContactInfoPanel: View {
+    let contact: BridgeContact
+    let bridge: DataBridgeClient
+    @State private var showMessageMenu = false
+
+    var body: some View {
+        ZStack(alignment: .top) {
+            LinearGradient(
+                colors: [
+                    Color(hue: contact.hue, saturation: 0.45, brightness: 0.28),
+                    Color(white: 0.17)
+                ],
+                startPoint: .top,
+                endPoint: UnitPoint(x: 0.5, y: 0.5)
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    // Avatar + name
+                    VStack(spacing: 10) {
+                        ZStack {
+                            Circle().fill(Color(hue: contact.hue, saturation: 0.5, brightness: 0.72))
+                            Text(contact.initials)
+                                .font(.system(size: 34, weight: .semibold))
+                                .foregroundStyle(.white)
+                        }
+                        .frame(width: 90, height: 90)
+                        .shadow(
+                            color: Color(hue: contact.hue, saturation: 0.6, brightness: 0.5).opacity(0.5),
+                            radius: 20, x: 0, y: 8
+                        )
+                        Text(contact.displayName)
+                            .font(.system(size: 22, weight: .bold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 28)
+                    .padding(.bottom, 24)
+
+                    // Action buttons — Message (SMS) · Call · More
+                    GlassEffectContainer(spacing: 16) {
+                        HStack(spacing: 16) {
+                            // Message → SMS in-app directly
+                            VStack(spacing: 7) {
+                                Button {
+                                    let phone = contact.phoneNumbers.first ?? ""
+                                    NotificationCenter.default.post(
+                                        name: .navigateToSMS, object: nil,
+                                        userInfo: ["phone": phone]
+                                    )
+                                } label: {
+                                    Image(systemName: "message.fill")
+                                        .font(.system(size: 18, weight: .medium))
+                                        .frame(width: 52, height: 52)
+                                        .contentShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .glassEffect(.regular.interactive(), in: Circle())
+                                Text("Message")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            // Call — directly initiates the call
+                            VStack(spacing: 7) {
+                                Button {
+                                    if let phone = contact.phoneNumbers.first {
+                                        bridge.placeCall(phone)
+                                    }
+                                } label: {
+                                    Image(systemName: "phone.fill")
+                                        .font(.system(size: 18, weight: .medium))
+                                        .frame(width: 52, height: 52)
+                                        .contentShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .glassEffect(.regular.interactive(), in: Circle())
+                                Text("Call")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            // More — third-party app actions
+                            VStack(spacing: 7) {
+                                Button {
+                                    let phone = contact.phoneNumbers.first ?? ""
+                                    bridge.fetchContactApps(phone: phone, name: contact.displayName)
+                                    showMessageMenu.toggle()
+                                } label: {
+                                    Image(systemName: "ellipsis")
+                                        .font(.system(size: 18, weight: .medium))
+                                        .frame(width: 52, height: 52)
+                                        .contentShape(Circle())
+                                }
+                                .buttonStyle(.plain)
+                                .glassEffect(.regular.interactive(), in: Circle())
+                                .popover(isPresented: $showMessageMenu, arrowEdge: .bottom) {
+                                    AppActionsMenu(
+                                        phone: contact.phoneNumbers.first ?? "",
+                                        bridge: bridge,
+                                        onDismiss: { showMessageMenu = false }
+                                    )
+                                }
+                                Text("Other")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .padding(.bottom, 26)
+
+                    // Organisation
+                    if let org = contact.organization {
+                        let detail = [contact.jobTitle, org].compactMap { $0 }.joined(separator: " · ")
+                        infoSection(title: "Organisation") {
+                            infoRow(icon: "building.2", value: detail)
+                        }
+                        .padding(.bottom, 12)
+                    }
+
+                    // Phone numbers — deduplicated by digits-only comparison
+                    let dedupedPhones: [String] = {
+                        var seen = Set<String>()
+                        return contact.phoneNumbers.filter { seen.insert($0.filter(\.isNumber)).inserted }
+                    }()
+                    if !dedupedPhones.isEmpty {
+                        infoSection(title: "Phone") {
+                            ForEach(Array(dedupedPhones.enumerated()), id: \.offset) { idx, num in
+                                if idx > 0 { Divider().opacity(0.1).padding(.leading, 42) }
+                                infoRow(icon: "phone", value: num)
+                            }
+                        }
+                        .padding(.bottom, 12)
+                    }
+
+                    // Emails — tappable to open a draft in the default mail app
+                    if !contact.emails.isEmpty {
+                        infoSection(title: "Email") {
+                            ForEach(Array(contact.emails.enumerated()), id: \.offset) { (idx: Int, email: String) in
+                                VStack(spacing: 0) {
+                                    if idx > 0 { Divider().opacity(0.1).padding(.leading, 42) }
+                                    Button {
+                                        if let url = URL(string: "mailto:\(email)") {
+                                            NSWorkspace.shared.open(url)
+                                        }
+                                    } label: {
+                                        infoRow(icon: "envelope", value: email)
+                                            .foregroundStyle(Color.accentColor)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Open in Mail")
+                                }
+                            }
+                        }
+                        .padding(.bottom, 12)
+                    }
+
+                    // Birthday
+                    if let bday = contact.birthday {
+                        infoSection(title: "Birthday") {
+                            infoRow(icon: "gift", value: bday)
+                        }
+                        .padding(.bottom, 12)
+                    }
+
+                    // Addresses
+                    if !contact.addresses.isEmpty {
+                        infoSection(title: "Address") {
+                            ForEach(Array(contact.addresses.enumerated()), id: \.offset) { idx, addr in
+                                if idx > 0 { Divider().opacity(0.1).padding(.leading, 42) }
+                                infoRowMultiline(icon: "mappin", value: addr)
+                            }
+                        }
+                        .padding(.bottom, 12)
+                    }
+
+                    // Websites
+                    if !contact.websites.isEmpty {
+                        infoSection(title: "Website") {
+                            ForEach(Array(contact.websites.enumerated()), id: \.offset) { idx, url in
+                                if idx > 0 { Divider().opacity(0.1).padding(.leading, 42) }
+                                infoRow(icon: "globe", value: url)
+                            }
+                        }
+                        .padding(.bottom, 12)
+                    }
+
+                    // Notes
+                    if let notes = contact.notes {
+                        infoSection(title: "Notes") {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: "note.text")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 18)
+                                    .padding(.top, 1)
+                                Text(notes)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.primary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                        }
+                        .padding(.bottom, 16)
+                    }
+                }
+                .padding(.horizontal, 16)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func infoSection<Content: View>(title: String,
+                                            @ViewBuilder content: () -> Content) -> some View {
+        VStack(spacing: 0) { content() }
+            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(white: 0.20)))
+    }
+
+    private func infoRow(icon: String, value: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            Text(value)
+                .font(.system(size: 13))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private func infoRowMultiline(icon: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+                .padding(.top, 1)
+            Text(value)
+                .font(.system(size: 13))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+}
+
+// MARK: - App Actions Menu
+
+/// Popover for the "Other" button — shows only dynamically-detected third-party app actions.
+private struct AppActionsMenu: View {
+    let phone: String
+    @ObservedObject var bridge: DataBridgeClient
+    let onDismiss: () -> Void
+
+    private var apps: [BridgeContactApp]? { bridge.contactApps[phone] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let apps {
+                if apps.isEmpty {
+                    Text("No connected apps found")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 6)
+                } else {
+                    ForEach(apps, id: \.packageName) { app in
+                        Button {
+                            onDismiss()
+                            // Try to open on Mac first (WhatsApp / Telegram); fall back to first Android action
+                            if !openOnMac(packageName: app.packageName, phone: phone) {
+                                if let first = app.actions.first {
+                                    bridge.executeContactAction(dataId: first.dataId,
+                                                                mimeType: first.mimeType)
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 10) {
+                                if let img = app.iconImage {
+                                    Image(nsImage: img)
+                                        .resizable()
+                                        .frame(width: 20, height: 20)
+                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                } else {
+                                    Image(systemName: "app.fill")
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 20)
+                                }
+                                Text(app.appName)
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.primary)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 6)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading…")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 6)
+            }
+        }
+        .padding(12)
+        .frame(minWidth: 200)
+    }
+
+    /// Try to open a known app on the Mac using its URL scheme (chat / profile only).
+    /// Returns true if a Mac app handled the URL.
+    @discardableResult
+    private func openOnMac(packageName: String, phone: String) -> Bool {
+        let digits = phone.filter { $0.isNumber || $0 == "+" }
+        let urlString: String?
+        switch packageName {
+        case "com.whatsapp", "com.whatsapp.w4b":
+            urlString = "whatsapp://send?phone=\(digits)"
+        case "org.telegram.messenger", "org.telegram.messenger.web", "org.telegram.plus":
+            urlString = "tg://resolve?phone=\(digits)"
+        default:
+            urlString = nil
+        }
+        guard let str = urlString, let url = URL(string: str) else { return false }
+        guard NSWorkspace.shared.urlForApplication(toOpen: url) != nil else { return false }
+        NSWorkspace.shared.open(url)
+        return true
     }
 }
 
@@ -1975,6 +2774,14 @@ private struct PopoutView: View {
                                     windowManager.toggleAlwaysOnTop()
                                 }
                                 .glassEffectID("pin", in: ns)
+                                ToolbarButton(
+                                    icon: manager.audioEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                                    help: manager.audioEnabled ? "Disable Audio" : "Enable Audio",
+                                    tint: manager.audioEnabled ? nil : .orange
+                                ) {
+                                    manager.audioEnabled.toggle()
+                                }
+                                .glassEffectID("audio", in: ns)
                                 ToolbarButton(icon: "camera", help: "Screenshot") { manager.takeScreenshot() }
                                     .glassEffectID("screenshot", in: ns)
                                 ToolbarButton(icon: "stop.circle.fill", help: "Disconnect", tint: .red) {

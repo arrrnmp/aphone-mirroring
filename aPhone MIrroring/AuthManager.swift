@@ -34,7 +34,6 @@ final class AuthManager {
 
     // MARK: - Private
 
-    private var backgroundedAt: Date?
     private var inactivityTask: Task<Void, Never>?
 
     private static let lockDelay: TimeInterval = 120 // 2 minutes
@@ -63,17 +62,22 @@ final class AuthManager {
     // MARK: - App lifecycle
 
     func handleAppResigned() {
-        backgroundedAt = Date()
         cancelInactivityTimer()
+        // Lock even while backgrounded after the delay — prevents seeing content in Mission Control
+        inactivityTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.lockDelay))
+            guard !Task.isCancelled else { return }
+            self?.lock()
+        }
     }
 
     func handleAppActivated() {
-        if let bg = backgroundedAt,
-           Date().timeIntervalSince(bg) >= Self.lockDelay {
-            lock()
+        // If background timer already fired, we're locked — leave it
+        // If still running, cancel it and restart the inactivity timer normally
+        if !isLocked {
+            cancelInactivityTimer()
+            resetInactivityTimer()
         }
-        backgroundedAt = nil
-        if !isLocked { resetInactivityTimer() }
     }
 
     /// Call on screen-saver / fast-user-switch to lock immediately.

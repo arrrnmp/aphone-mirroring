@@ -1,28 +1,103 @@
-# Scrcpy SwiftUI
+# aPhone Mirroring
 
-A small macOS SwiftUI app that displays and interacts with an Android device screen using scrcpy.
+A native macOS app that mirrors your Android device screen and bridges your phone's data — messages, calls, photos, contacts, and notifications — directly to your Mac.
 
-### Prerequisites
-- macOS 26 with the Xcode 26+
-- Homebrew (https://brew.sh/)
-- An Android device with USB debugging enabled
+Built on the [scrcpy](https://github.com/Genymobile/scrcpy) protocol (v3.3.4) for mirroring, with a custom TCP data bridge to a companion Android service for real phone data.
 
-### Install dependencies
-1. Install adb and scrcpy via Homebrew: `brew install android-platform-tools scrcpy`
-2. Verify adb can see your device: `adb devices`
+---
 
-### Usage
-1. Open `Scrcpy SwiftUI.xcodeproj` in Xcode.
-2. Connect your Android device via USB and ensure USB debugging is allowed.
-3. Build and run the app from Xcode (select your Mac as the run target).
+## Features
 
-### Notes
-- The app relies on the scrcpy server and adb. If scrcpy fails to start, try running `scrcpy` from Terminal to confirm the environment is working.
-- For wireless debugging, follow `adb tcpip` workflows and connect to the device's IP address.
+### Screen Mirroring
+- H.264 hardware-accelerated video over USB (scrcpy v3.3.4)
+- PCM audio streamed in real-time with zero silence gaps
+- Full input forwarding: keyboard, mouse, trackpad gestures, scroll
+- File drag-and-drop: APKs install automatically, other files push to Downloads
+- Pop-out phone window with aspect-ratio locking and rotation support
+- Hardware control buttons: Back, Home, Recents, Volume, Mute, Power, Rotate
 
-### Troubleshooting
-- If the app doesn't see the device, run `adb kill-server && adb start-server` and reconnect the device.
-- If permissions are required for network or device access, grant them in System Settings.
+### Real Phone Data (via DataBridgeService companion app)
+- **Messages**: Real SMS/MMS threads and conversations, send SMS replies, mark as read
+- **Calls**: Full call log with contact names, duration, and call type
+- **Photos**: Paginated photo grid with real thumbnails; open full-res in Preview
+- **Contacts**: Full contact book with phone, email, organization, social apps
+- **Notifications**: Android notifications delivered to macOS Notification Center with actionable reply support
+- **Active Call UI**: Floating Liquid Glass call window with mute, end, and audio-routing controls
 
-### License
-This project is provided under the terms of the existing LICENSE file in the repository.
+### Bluetooth & Audio
+- Automatic Bluetooth pairing detection via IOBluetooth (HFP for call audio)
+- Prompts user to pair if not already paired; polls for completion
+- Route call audio between Mac and phone during active calls
+
+### macOS Integration
+- Menu bar battery status with charging indicator
+- Biometric/password auth gating for the data panel (locks after 2 min inactivity)
+- Screenshot capture to Desktop with shutter sound and thumbnail preview
+- Bidirectional clipboard sync (text)
+- Always-on-top pin mode
+
+---
+
+## Requirements
+
+- macOS 26.2 or later
+- Xcode 26+
+- Android device with USB debugging enabled
+- [PhoneConnect](https://github.com/arrrnmp/phoneconnect) companion app installed on Android (for data bridge features)
+
+---
+
+## Install dependencies
+
+```bash
+brew install android-platform-tools
+```
+
+Verify ADB can see your device:
+
+```bash
+adb devices
+```
+
+---
+
+## Build & Run
+
+Open `aPhone Mirroring.xcodeproj` in Xcode, select your Mac as the run destination, and build.
+
+Or via CLI:
+
+```bash
+cd "aPhone Mirroring"
+xcodebuild -scheme "Scrcpy SwiftUI" -configuration Debug -destination 'platform=macOS' build
+```
+
+---
+
+## Usage
+
+1. Connect your Android device via USB and allow USB debugging.
+2. Launch aPhone Mirroring — it will detect the device automatically.
+3. Tap **Connect** to start mirroring.
+4. Install the **PhoneConnect** companion app on Android to enable Messages, Calls, Photos, Contacts, and Notifications.
+
+---
+
+## Troubleshooting
+
+- **Device not detected**: Run `adb kill-server && adb start-server`, reconnect the device.
+- **No audio**: Ensure the device allows audio over USB; check that no other app is holding the audio session.
+- **Data bridge not connecting**: Make sure the PhoneConnect companion app is running on Android and USB is connected. The bridge auto-retries with exponential backoff.
+- **Bluetooth pairing fails**: Make the Android device discoverable manually before tapping "Pair Now."
+
+---
+
+## Architecture
+
+See [CLAUDE.md](CLAUDE.md) for a detailed breakdown of every component, the scrcpy protocol, data bridge protocol, state management patterns, and UI design rules.
+
+---
+
+## License
+
+This project is provided under the terms of the LICENSE file in the repository.

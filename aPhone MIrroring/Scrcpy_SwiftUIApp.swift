@@ -5,6 +5,7 @@
 
 import SwiftUI
 import AppKit
+import UserNotifications
 
 let controlBarHeight: CGFloat = 46
 
@@ -62,8 +63,54 @@ final class WindowManager {
 
 // MARK: - App Delegate
 
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     let windowManager = WindowManager()
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let center = UNUserNotificationCenter.current()
+        center.delegate = self
+
+        // Register the base "no actions" category that all info notifications use
+        let infoCategory = UNNotificationCategory(
+            identifier: "android_info", actions: [], intentIdentifiers: [], options: []
+        )
+        center.setNotificationCategories([infoCategory])
+    }
+
+    // Show notification banners AND add to notification center list when app is foreground
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                willPresent notification: UNNotification,
+                                withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
+        completionHandler([.banner, .list, .sound])
+    }
+
+    // Handle the user tapping a notification action (Reply button, action buttons, etc.)
+    func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                didReceive response: UNNotificationResponse,
+                                withCompletionHandler completionHandler: @escaping () -> Void) {
+        defer { completionHandler() }
+
+        let actionId = response.actionIdentifier
+        guard actionId != UNNotificationDefaultActionIdentifier,
+              actionId != UNNotificationDismissActionIdentifier else { return }
+
+        let userInfo = response.notification.request.content.userInfo
+        guard let notifKey = userInfo["notifKey"] as? String else { return }
+
+        // Action identifiers are "ACTION_0", "ACTION_1", etc.
+        guard let indexStr = actionId.components(separatedBy: "_").last,
+              let actionIndex = Int(indexStr) else { return }
+
+        let replyText = (response as? UNTextInputNotificationResponse)?.userText
+
+        Task { @MainActor in
+            DataBridgeClient.shared?.sendNotificationAction(
+                notifKey: notifKey,
+                actionIndex: actionIndex,
+                replyText: replyText
+            )
+        }
+    }
 }
 
 // MARK: - App entry point
@@ -77,6 +124,12 @@ struct aPhone_MirroringApp: App {
             ContentView()
                 .preferredColorScheme(.dark)
                 .environment(appDelegate.windowManager)
+                .task {
+                    let center = UNUserNotificationCenter.current()
+                    let granted = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
+                    log("Notification permission: \(granted ? "granted ✓" : "denied — enable in System Settings > Notifications")",
+                        level: granted ? .ok : .warn)
+                }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentMinSize)
