@@ -5,8 +5,10 @@
 
 import Foundation
 import AppKit
+import SwiftUI
 import Combine
 import Network
+import ImageIO
 
 // MARK: - Connection State
 
@@ -15,6 +17,14 @@ enum ScrcpyState: Equatable {
     case connecting
     case connected
     case error(String)
+}
+
+// MARK: - ScreenshotFlash
+
+struct ScreenshotFlash: Identifiable {
+    let id    = UUID()
+    let image: CGImage
+    let url:   URL
 }
 
 // MARK: - ScrcpyManager
@@ -27,6 +37,7 @@ final class ScrcpyManager: ObservableObject {
     @Published var availableDevices: [String] = []  // display strings "Model (serial)"
     @Published var batteryLevel: Int? = nil
     @Published var batteryCharging: Bool = false
+    @Published var screenshotFlash: ScreenshotFlash? = nil
 
     // Serial of the currently connected device, used for disconnect detection
     private var connectedSerial: String? = nil
@@ -650,6 +661,52 @@ final class ScrcpyManager: ObservableObject {
             process.terminate()
         }
     }
+
+    // MARK: - Screenshot
+
+    /// Captures the currently displayed video frame and saves it to the Desktop as a PNG.
+    /// Plays a click sound, shows a thumbnail overlay, and auto-dismisses after 3.5 s.
+    /// No command is sent to the device.
+    func takeScreenshot() {
+        // Prefer capturing from the GPU compositor (works for video layers).
+        // Fall back to VT re-decode if no VideoNSView is reachable.
+        guard let image = videoStream.captureCurrentFrame() else {
+            log("Screenshot: no decoded frame available yet", level: .warn)
+            return
+        }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+        let filename = "aPhone Screenshot \(formatter.string(from: Date())).png"
+        let desktop  = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
+        let fileURL  = desktop.appendingPathComponent(filename)
+
+        guard let dest = CGImageDestinationCreateWithURL(fileURL as CFURL, "public.png" as CFString, 1, nil) else {
+            log("Screenshot: could not create destination at \(fileURL.path)", level: .error)
+            return
+        }
+        CGImageDestinationAddImage(dest, image, nil)
+        guard CGImageDestinationFinalize(dest) else {
+            log("Screenshot: failed to write PNG", level: .error)
+            return
+        }
+
+        log("Screenshot saved: \(filename)", level: .ok)
+        let shutterPath = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif"
+        (NSSound(contentsOfFile: shutterPath, byReference: true) ?? NSSound(named: "Pop"))?.play()
+
+        let flash = ScreenshotFlash(image: image, url: fileURL)
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            screenshotFlash = flash
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(3.5))
+            if screenshotFlash?.id == flash.id {
+                withAnimation(.easeOut(duration: 0.25)) { screenshotFlash = nil }
+            }
+        }
+    }
+
 
     private func extractSerial(from raw: String?) -> String? {
         guard let raw else { return nil }

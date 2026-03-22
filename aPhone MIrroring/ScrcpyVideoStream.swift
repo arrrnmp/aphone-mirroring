@@ -5,7 +5,9 @@
 
 import Foundation
 import AVFoundation
+import CoreImage
 import CoreMedia
+import VideoToolbox
 import Combine
 import Network
 
@@ -27,6 +29,12 @@ final class ScrcpyVideoStream: ObservableObject {
     private var formatDescription: CMVideoFormatDescription?
     private var sps: Data?
     private var pps: Data?
+
+    // Persistent decode session for screenshot capture.
+    // Decodes every frame in the background and stores the latest CVPixelBuffer.
+    // This avoids the deadlock that occurs when creating a VT session on @MainActor on demand.
+    private var captureSession: VTDecompressionSession?
+    private var latestDecodedBuffer: CVPixelBuffer?
 
     // Counters for log
     private var configPacketCount = 0
@@ -56,6 +64,7 @@ final class ScrcpyVideoStream: ObservableObject {
         formatDescription = nil
         sps = nil
         pps = nil
+        tearDownCaptureSession()
 
         // Run the read loop on a detached task so it never blocks @MainActor
         readTask = Task.detached(priority: .userInitiated) { [weak self] in
@@ -74,6 +83,7 @@ final class ScrcpyVideoStream: ObservableObject {
         formatDescription = nil
         sps = nil
         pps = nil
+        tearDownCaptureSession()
     }
 
     // MARK: - Read loop (runs off main actor)
@@ -164,6 +174,7 @@ final class ScrcpyVideoStream: ObservableObject {
                     videoSize = newSize
                     log("Video size updated to \(dim.width)×\(dim.height)", level: .ok)
                 }
+                setupCaptureSession(desc)
             } else {
                 log("Format description build FAILED", level: .error)
             }
@@ -261,6 +272,14 @@ final class ScrcpyVideoStream: ObservableObject {
         // Checking isReadyForMoreMediaData and flushing on "not ready" destroys the decode
         // pipeline on every frame and causes single-digit framerate.
         displayLayer.sampleBufferRenderer.enqueue(sb)
+
+        // Decode in parallel into the capture session so screenshots always have a fresh buffer.
+        if let sess = captureSession {
+            VTDecompressionSessionDecodeFrame(sess, sampleBuffer: sb, flags: [], infoFlagsOut: nil) { [weak self] _, _, imageBuffer, _, _ in
+                guard let pb = imageBuffer else { return }
+                DispatchQueue.main.async { self?.latestDecodedBuffer = pb }
+            }
+        }
         enqueuedFrameCount += 1
 
         // Only flush on an actual renderer error
@@ -337,5 +356,43 @@ final class ScrcpyVideoStream: ObservableObject {
             }
         }
         return desc
+    }
+
+    // MARK: - Screenshot
+
+    /// Returns a CGImage from the most recently decoded frame.
+    /// The persistent capture session keeps `latestDecodedBuffer` current on every frame.
+    /// No command is sent to the device.
+    func captureCurrentFrame() -> CGImage? {
+        guard let pb = latestDecodedBuffer else { return nil }
+        let ci  = CIImage(cvPixelBuffer: pb)
+        let ctx = CIContext(options: [.useSoftwareRenderer: false])
+        return ctx.createCGImage(ci, from: ci.extent)
+    }
+
+    // MARK: - Capture session lifecycle
+
+    private func setupCaptureSession(_ desc: CMVideoFormatDescription) {
+        tearDownCaptureSession()
+        let pixelAttrs: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        var session: VTDecompressionSession?
+        let status = VTDecompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            formatDescription: desc,
+            decoderSpecification: nil,
+            imageBufferAttributes: pixelAttrs as CFDictionary,
+            outputCallback: nil,
+            decompressionSessionOut: &session
+        )
+        if status == noErr { captureSession = session }
+        else { log("Screenshot capture session create failed: \(status)", level: .warn) }
+    }
+
+    private func tearDownCaptureSession() {
+        if let sess = captureSession { VTDecompressionSessionInvalidate(sess) }
+        captureSession      = nil
+        latestDecodedBuffer = nil
     }
 }

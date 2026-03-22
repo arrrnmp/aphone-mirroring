@@ -257,3 +257,4 @@ final class VideoNSView: NSView {
         // Modifier-only events; no action needed since we read flags on each key event
     }
 }
+

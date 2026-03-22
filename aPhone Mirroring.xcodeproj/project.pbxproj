@@ -11,9 +11,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		938723722F6896FA004D1014 /* Scrcpy SwiftUI */ = {
+		938723722F6896FA004D1014 /* aPhone MIrroring */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "Scrcpy SwiftUI";
+			path = "aPhone MIrroring";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -32,7 +32,7 @@
 		938723672F6896FA004D1014 = {
 			isa = PBXGroup;
 			children = (
-				938723722F6896FA004D1014 /* Scrcpy SwiftUI */,
+				938723722F6896FA004D1014 /* aPhone MIrroring */,
 				938723712F6896FA004D1014 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -61,7 +61,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				938723722F6896FA004D1014 /* Scrcpy SwiftUI */,
+				938723722F6896FA004D1014 /* aPhone MIrroring */,
 			);
 			name = "Scrcpy SwiftUI";
 			packageProductDependencies = (
@@ -85,7 +85,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 9387236B2F6896FA004D1014 /* Build configuration list for PBXProject "Scrcpy SwiftUI" */;
+			buildConfigurationList = 9387236B2F6896FA004D1014 /* Build configuration list for PBXProject "aPhone Mirroring" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -265,13 +265,14 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.aaronmompie.Scrcpy-SwiftUI";
+				PRODUCT_BUNDLE_IDENTIFIER = com.aaronmompie.aphonemirroring;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
@@ -309,13 +310,14 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = "com.aaronmompie.Scrcpy-SwiftUI";
+				PRODUCT_BUNDLE_IDENTIFIER = com.aaronmompie.aphonemirroring;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
@@ -336,7 +338,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		9387236B2F6896FA004D1014 /* Build configuration list for PBXProject "Scrcpy SwiftUI" */ = {
+		9387236B2F6896FA004D1014 /* Build configuration list for PBXProject "aPhone Mirroring" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				938723792F6896FB004D1014 /* Debug */,
