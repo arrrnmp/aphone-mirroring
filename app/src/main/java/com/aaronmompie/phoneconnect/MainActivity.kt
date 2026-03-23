@@ -18,6 +18,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.scaleIn
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -239,19 +240,20 @@ fun OnboardingPager(
                 )
                 2 -> PermissionStep(
                     icon = Icons.Rounded.Bluetooth,
-                    title = "Nearby Devices",
-                    description = "Automatically pair and connect to your Mac using Bluetooth for a seamless experience.",
-                    buttonText = if (isNearbyDevicesGranted) "Bluetooth Ready" else "Enable Bluetooth",
-                    isEnabled = !isNearbyDevicesGranted,
+                    title = "Pair with Mac",
+                    description = "Pair this phone with your Mac via Bluetooth. This is required for call audio routing — without pairing, you can't route call audio to your Mac.",
+                    buttonText = if (isNearbyDevicesGranted) "Open Bluetooth Settings" else "Enable Bluetooth",
+                    isEnabled = true,
                     onAction = {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        if (!isNearbyDevicesGranted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                             nearbyDevicesLauncher.launch(arrayOf(
                                 Manifest.permission.BLUETOOTH_SCAN,
                                 Manifest.permission.BLUETOOTH_ADVERTISE,
                                 Manifest.permission.BLUETOOTH_CONNECT
                             ))
                         } else {
-                            onNearbyDevicesGranted()
+                            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) onNearbyDevicesGranted()
+                            it.startActivity(Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS))
                         }
                     }
                 )
@@ -308,13 +310,17 @@ fun OnboardingPager(
                     buttonText = if (isPhoneAccessGranted) "Phone Connected" else "Connect Phone",
                     isEnabled = !isPhoneAccessGranted,
                     onAction = {
-                        phoneLauncher.launch(arrayOf(
-                            Manifest.permission.CALL_PHONE, 
+                        val phonePerms = mutableListOf(
+                            Manifest.permission.CALL_PHONE,
                             Manifest.permission.READ_CONTACTS,
                             Manifest.permission.READ_CALL_LOG,
                             Manifest.permission.WRITE_CALL_LOG,
                             Manifest.permission.READ_PHONE_STATE
-                        ))
+                        )
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            phonePerms.add(Manifest.permission.ANSWER_PHONE_CALLS)
+                        }
+                        phoneLauncher.launch(phonePerms.toTypedArray())
                     }
                 )
                 8 -> PermissionStep(
@@ -477,9 +483,21 @@ fun PermissionStep(
 
 /**
  * SuccessScreen displays a confirmation UI when all permissions are granted and setup is complete.
+ * Also starts DataBridgeService so data syncing begins immediately.
  */
 @Composable
 fun SuccessScreen() {
+    val context = LocalContext.current
+    // Start the data bridge service when all permissions are in place
+    LaunchedEffect(Unit) {
+        val serviceIntent = Intent(context, DataBridgeService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            context.startForegroundService(serviceIntent)
+        } else {
+            context.startService(serviceIntent)
+        }
+    }
+
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
@@ -520,6 +538,18 @@ fun SuccessScreen() {
                 textAlign = TextAlign.Center,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+
+            Spacer(modifier = Modifier.height(48.dp))
+
+            OutlinedButton(
+                onClick = {
+                    val service = DataBridgeService.instance ?: return@OutlinedButton
+                    val json = """{"type":"push_notification","pkg":"com.aaronmompie.phoneconnect","title":"Test Notification","text":"Hello from your Android phone! 👋","ts":${System.currentTimeMillis()}}"""
+                    service.pushEvent(json)
+                }
+            ) {
+                Text("Send Test Notification")
+            }
         }
     }
 }
@@ -544,11 +574,15 @@ private fun isGalleryPermissionGranted(context: Context): Boolean {
 }
 
 private fun isPhonePermissionGranted(context: Context): Boolean {
-    return ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED &&
+    val base = ContextCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_CALL_LOG) == PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
+    val answerPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED
+    } else true
+    return base && answerPerm
 }
 
 private fun isSmsPermissionGranted(context: Context): Boolean {
