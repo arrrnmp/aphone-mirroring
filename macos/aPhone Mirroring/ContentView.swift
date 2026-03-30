@@ -1323,7 +1323,7 @@ private struct MessageBubble: View {
                             .fill(message.isFromMe ? Color.blue : Color.white.opacity(0.12))
                     )
                 Text(message.timeLabel)
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 4)
             }
