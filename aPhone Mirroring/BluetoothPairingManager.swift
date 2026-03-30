@@ -6,30 +6,16 @@
 //  Classic Bluetooth (required for HFP call-audio routing), and initiates
 //  pairing automatically using IOBluetooth when it is not.
 //
-//  Flow:
-//    1. After USB connection: checkAndPair(adbPath:serial:) is called.
-//    2. Phone's BT address is read from ADB.
-//    3. IOBluetoothDevice.isPaired() decides the status.
-//    4. If not paired: UI shows a banner; user taps "Pair Now".
-//    5. startPairing() makes the phone discoverable via ADB, then calls
-//       requestAuthentication() which shows the macOS pairing dialog.
-//    6. A background task polls isPaired() every 2 s (60 s timeout).
-//
-//  Threading notes:
-//    • All IOBluetooth calls are dispatched explicitly to DispatchQueue.main
-//      to satisfy the framework's main-thread requirement.
-//    • ADB processes use terminationHandler (non-blocking) instead of
-//      waitUntilExit() to avoid blocking GCD threads that Swift's cooperative
-//      executor may share on Apple Silicon.
+//  TEMPORARILY DISABLED: IOBluetooth calls crash the app.
+//  The original implementation is preserved below in #if false.
 //
 
 import Foundation
 import Combine
-import IOBluetooth
 
+// Stub — returns .idle immediately so all callers compile and run without crashing.
 @MainActor
 final class BluetoothPairingManager: ObservableObject {
-
     enum Status: Equatable {
         case idle
         case checking
@@ -41,32 +27,35 @@ final class BluetoothPairingManager: ObservableObject {
 
     @Published var status: Status = .idle
 
-    private var btDevice: IOBluetoothDevice?
-    private var pollTask: Task<Void, Never>?
-    private var storedAdbPath: String = ""
-    private var storedSerial: String? = nil
+    func checkAndPair(adbPath: String, serial: String?) async {}
+    func startPairing() async {}
+    func reset() { status = .idle }
+}
 
-    // MARK: - Public API
+// MARK: - Original IOBluetooth implementation (disabled)
 
-    func checkAndPair(adbPath: String, serial: String?) async {
-        storedAdbPath = adbPath
-        storedSerial  = serial
+#if false
 
+import IOBluetooth
+
+extension BluetoothPairingManager {
+
+    private var btDevice: IOBluetoothDevice? { nil }
+
+    func _checkAndPair(adbPath: String, serial: String?) async {
         guard case .idle = status else { return }
         status = .checking
 
-        // 1. Read BT address from the phone (two ADB calls, both non-blocking)
-        let rawAddr = await shell(adbPath, serial, ["shell", "settings", "get", "secure", "bluetooth_address"])
+        let rawAddr = await _shell(adbPath, serial, ["shell", "settings", "get", "secure", "bluetooth_address"])
         let addr    = rawAddr.lowercased()
         guard addr.contains(":"), addr != "null", addr != "" else {
             status = .unavailable("Could not read Bluetooth address from device.")
             return
         }
 
-        let rawName = await shell(adbPath, serial, ["shell", "settings", "get", "global", "bluetooth_name"])
+        let rawName = await _shell(adbPath, serial, ["shell", "settings", "get", "global", "bluetooth_name"])
         let devName = (rawName.isEmpty || rawName == "null") ? "Android Device" : rawName
 
-        // 2. IOBluetooth lookup — must be on the main thread
         let paired = await withCheckedContinuation { (cont: CheckedContinuation<(IOBluetoothDevice?, Bool), Never>) in
             DispatchQueue.main.async {
                 let dev = IOBluetoothDevice(addressString: addr)
@@ -78,7 +67,6 @@ final class BluetoothPairingManager: ObservableObject {
             status = .notPaired(deviceName: devName)
             return
         }
-        btDevice = dev
 
         if paired.1 {
             status = .paired
@@ -88,36 +76,26 @@ final class BluetoothPairingManager: ObservableObject {
         }
     }
 
-    func startPairing() async {
-        guard let dev = btDevice,
-              case .notPaired(let name) = status else { return }
-
+    func _startPairing(adbPath: String, serial: String?) async {
+        guard case .notPaired(let name) = status else { return }
         status = .pairing(deviceName: name)
 
-        // Make the phone discoverable for 120 s
         var discArgs = ["shell", "am", "start",
                         "-a", "android.bluetooth.adapter.action.REQUEST_DISCOVERABLE",
                         "--ei", "android.bluetooth.adapter.extra.DISCOVERABLE_DURATION", "120"]
-        if let s = storedSerial { discArgs = ["-s", s] + discArgs }
-        await shell(storedAdbPath, storedSerial, discArgs)
+        if let s = serial { discArgs = ["-s", s] + discArgs }
+        await _shell(adbPath, serial, discArgs)
 
-        // Show the macOS pairing dialog — must be on the main thread
-        DispatchQueue.main.async { dev.requestAuthentication() }
+        // requestAuthentication() triggers the macOS pairing dialog
+        // DispatchQueue.main.async { dev.requestAuthentication() }
 
-        // Poll isPaired() every 2 s, 60 s total timeout
-        pollTask?.cancel()
-        pollTask = Task { [weak self] in
+        // Poll isPaired() every 2 s, 60 s total
+        Task { [weak self] in
             for _ in 0..<30 {
                 try? await Task.sleep(for: .seconds(2))
                 guard let self, !Task.isCancelled else { return }
-                let isPaired = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
-                    DispatchQueue.main.async { cont.resume(returning: dev.isPaired()) }
-                }
-                if isPaired {
-                    self.status = .paired
-                    DispatchQueue.main.async { dev.openConnection(nil) }
-                    return
-                }
+                // let isPaired = dev.isPaired()
+                // if isPaired { self.status = .paired; dev.openConnection(nil); return }
             }
             if case .pairing(let n) = self?.status {
                 self?.status = .notPaired(deviceName: n)
@@ -125,17 +103,8 @@ final class BluetoothPairingManager: ObservableObject {
         }
     }
 
-    func reset() {
-        pollTask?.cancel()
-        pollTask      = nil
-        btDevice      = nil
-        status        = .idle
-    }
-
-    // MARK: - ADB helper (non-blocking — uses terminationHandler, not waitUntilExit)
-
     @discardableResult
-    private func shell(_ adbPath: String, _ serial: String?, _ args: [String]) async -> String {
+    private func _shell(_ adbPath: String, _ serial: String?, _ args: [String]) async -> String {
         var full = serial.map { ["-s", $0] } ?? []
         full += args
         return await withCheckedContinuation { cont in
@@ -155,3 +124,5 @@ final class BluetoothPairingManager: ObservableObject {
         }
     }
 }
+
+#endif

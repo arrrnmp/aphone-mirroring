@@ -56,9 +56,10 @@ private final class AudioRingBuffer: @unchecked Sendable {
             let s16 = base.assumingMemoryBound(to: Int16.self)
 
             os_unfair_lock_lock(&lock)
-            // If incoming frames would overflow, flush oldest to keep buffer current
+            // If incoming frames would overflow, flush oldest to keep buffer current.
+            // Clamp excess to count so count never goes negative (e.g. oversized payload).
             if count + frameCount > capacity {
-                let excess = count + frameCount - capacity
+                let excess = min(count + frameCount - capacity, count)
                 readIdx = (readIdx + excess) % capacity
                 count  -= excess
             }

@@ -16,9 +16,9 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		938723722F6896FA004D1014 /* aPhone MIrroring */ = {
+		938723722F6896FA004D1014 /* aPhone Mirroring */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			path = "aPhone MIrroring";
+			path = "aPhone Mirroring";
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -46,7 +46,7 @@
 		938723672F6896FA004D1014 = {
 			isa = PBXGroup;
 			children = (
-				938723722F6896FA004D1014 /* aPhone MIrroring */,
+				938723722F6896FA004D1014 /* aPhone Mirroring */,
 				9302085C2F70A647006399D7 /* Frameworks */,
 				938723712F6896FA004D1014 /* Products */,
 			);
@@ -76,7 +76,7 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				938723722F6896FA004D1014 /* aPhone MIrroring */,
+				938723722F6896FA004D1014 /* aPhone Mirroring */,
 			);
 			name = "Scrcpy SwiftUI";
 			packageProductDependencies = (

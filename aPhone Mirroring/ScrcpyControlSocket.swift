@@ -240,10 +240,11 @@ final class ScrcpyControlSocket: ObservableObject {
                         let lenData = try await connection.receiveExactly(4)
                         // Inline big-endian read to avoid calling @MainActor-inferred
                         // Data extension methods from a detached (nonisolated) task.
-                        let len = Int(
-                            UInt32(lenData[0]) << 24 | UInt32(lenData[1]) << 16 |
-                            UInt32(lenData[2]) <<  8 | UInt32(lenData[3])
-                        )
+                        let b0 = UInt32(lenData[0]) << 24
+                        let b1 = UInt32(lenData[1]) << 16
+                        let b2 = UInt32(lenData[2]) << 8
+                        let b3 = UInt32(lenData[3])
+                        let len = Int(b0 | b1 | b2 | b3)
                         guard len > 0, len < 1_000_000 else { continue }
                         let textData = try await connection.receiveExactly(len)
                         if let text = String(data: textData, encoding: .utf8) {
