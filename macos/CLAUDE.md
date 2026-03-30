@@ -148,8 +148,10 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - `titlebarAppearsTransparent = true`, `titleVisibility = .hidden` — full-bleed content
 - Traffic lights hidden at launch (alphaValue 0); hover-reveal toolbar restores them
 - `contentAspectRatio` locked to the phone's native ratio; updated on rotation via `onChange(of: videoSize)` with orientation-flip resize animation
-- `onToolbarExpand` closure updates `contentAspectRatio` to include `controlBarHeight` when toolbar is visible, so user drag-resize always maintains the phone's ratio
-- Hosts `PopoutView(manager:onRetreat:onToolbarExpand:)` — takes the full `ScrcpyManager` directly (not individual stream/socket callbacks), so it can access `videoStream`, `controlSocket`, `pushFiles`, `disconnect`, `takeScreenshot`, and `screenshotFlash` without threading extra closures through `makePopoutWindow`
+- `onToolbarExpand` closure updates `contentAspectRatio` to include `controlBarHeight` when toolbar is visible, so user drag-resize always maintains the phone's ratio. **Guarded against fullscreen**: skipped when `styleMask.contains(.fullScreen)` — frame dimensions are screen-sized there and would corrupt the stored ratio used to snap back on exit.
+- Hosts `PopoutView(manager:coordinator:onRetreat:onToolbarExpand:)` — takes the full `ScrcpyManager` and `PopoutCoordinator` directly.
+- Always allows fullscreen (`collectionBehavior = [.managed, .fullScreenPrimary]`) regardless of orientation.
+- **Exit-fullscreen snap**: `PopoutCoordinator` stores `preFSHeight` (saved in `windowWillEnterFullScreen`) and `videoRatio` (seeded from `popViewport()`, kept in sync via `onChange(of: videoSize)`). `windowDidExitFullScreen` uses `preFSHeight × videoRatio` to snap to the correct portrait or landscape size — deliberately ignores `contentAspectRatio` which may be corrupted.
 
 **Hover-reveal toolbar** (in `PopoutView`):
 - `ToolbarHoverArea` NSViewRepresentable overlaid on the full view, tracking-area covers top 50pt
@@ -213,9 +215,14 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 **Control Panel** (floating side window alongside the popout):
 - Borderless `NSWindow` hosting `ControlPanelView` SwiftUI view
 - 9 buttons: Back, Home, Recents, Volume Up, Volume Down, Mute, Power, Rotate
-- **`PopoutCoordinator`** (`NSWindowDelegate` on the popout window) manages the sidebar's lifetime:
+- **`PopoutCoordinator`** (`NSWindowDelegate` + `ObservableObject` on the popout window) manages the sidebar's lifetime and publishes state to `PopoutView`:
+  - `@Published isFullscreen` — drives the fullscreen bottom controls bar in `PopoutView`
+  - `@Published isPinned` — drives the pin button tint in `PopoutView`'s toolbar; `togglePin()` sets the **popout** window level (`.floating` / `.normal`). The main window's `WindowManager.toggleAlwaysOnTop()` is **not used** from the popout — they are independent.
   - `NSWindow.willMoveNotification` → fade sidebar to 0 (drag start)
   - `windowDidMove` → reposition sidebar + 0.15s debounce to restore alpha
+  - `NSWindow.didResizeNotification` → reposition sidebar (handles device rotation resizes), guarded by `!isFullscreen`
+  - `windowWillEnterFullScreen` → save `preFSHeight`, set `isFullscreen = true`, fade out + orderOut sidebar
+  - `windowDidExitFullScreen` → snap window via `preFSHeight × videoRatio`, reset `contentAspectRatio`, restore + fade in sidebar
   - `windowDidBecomeKey` / `windowDidResignKey` → show / hide sidebar (`orderFront` / `orderOut`)
   - `windowDidMiniaturize` / `windowDidDeminiaturize` → hide / show sidebar
   - Idle timer: 4s after last interaction → fade to 0.35 alpha; any button tap resets via `onInteraction` callback
@@ -230,7 +237,7 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - Device sends new config packet with flipped SPS dimensions
 - `ScrcpyVideoStream.processConfigPacket` extracts dimensions from `CMVideoFormatDescription` and updates `videoSize`
 - `ContentView.onChange(of: manager.videoStream.videoSize)` calls `controlSocket.updateVideoSize` (for input coordinate mapping); the main split-panel window does NOT lock to the phone's aspect ratio — the phone video is letterboxed inside the fixed-width phone panel
-- When popped out: `PhonePanelView.onChange(of: manager.videoStream.videoSize)` detects orientation flip (portrait↔landscape) and animates the pop-out window to a new size (current phone height becomes new phone width, keeping scale constant), then updates `contentAspectRatio`
+- When popped out: `PhonePanelView.onChange(of: manager.videoStream.videoSize)` detects orientation flip (portrait↔landscape) and animates the pop-out window to a new size (current phone height becomes new phone width, keeping scale constant), then updates `contentAspectRatio`. Also updates `coordinator?.videoRatio` on every size change so exit-fullscreen always snaps to the current ratio.
 - `PopoutView` observes `manager.videoStream.videoSize` (via `@ObservedObject var manager`) so the in-window `fitSize` computation updates live on every `videoSize` change
 
 **Video display:**

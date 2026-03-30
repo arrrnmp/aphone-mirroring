@@ -14,6 +14,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import Combine
 
 // MARK: - Navigation notifications
 
@@ -119,14 +120,14 @@ private struct PhonePanelView: View {
         // Sync state when the user closes either floating window directly
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notif in
             let win = notif.object as? NSWindow
-            if win === popoutWindow || win === sidebarWindow {
-                retreatViewport()
-            }
+            if win === popoutWindow || win === sidebarWindow { retreatViewport() }
         }
         // Keep the popout window in sync when the device rotates.
         .onChange(of: manager.videoStream.videoSize) { oldSize, newSize in
             guard viewportIsPopped, let win = popoutWindow, newSize.width > 0 else { return }
             let newRatio = newSize.width / newSize.height
+            // Keep coordinator in sync so exit-fullscreen snaps to the current ratio.
+            coordinator?.videoRatio = newRatio
             let orientationFlipped = oldSize.width > 0 &&
                 (oldSize.width > oldSize.height) != (newSize.width > newSize.height)
             if orientationFlipped {
@@ -222,26 +223,29 @@ private struct PhonePanelView: View {
     private func popViewport() {
         guard manager.state == .connected, !viewportIsPopped else { return }
         let coord = PopoutCoordinator()
-        let pWin  = makePopoutWindow()
+        // Seed the coordinator with the current video ratio so exit-fullscreen can snap correctly.
+        let vs = manager.videoStream.videoSize
+        coord.videoRatio = vs.width > 0 ? vs.width / vs.height : 9.0 / 16.0
+        let pWin  = makePopoutWindow(coordinator: coord)
         let sWin  = makeControlSidebarWindow(relativeTo: pWin,
                                               onInteraction: { [weak coord] in coord?.sidebarDidInteract() })
         coord.setup(popout: pWin, sidebar: sWin)
-        popoutWindow = pWin
+        popoutWindow  = pWin
         sidebarWindow = sWin
-        coordinator = coord
+        coordinator   = coord
         viewportIsPopped = true
     }
 
     private func retreatViewport() {
         guard viewportIsPopped else { return }
-        viewportIsPopped = false          // set first to prevent re-entry from notification
-        popoutWindow?.delegate = nil      // detach coordinator before closing
+        viewportIsPopped = false
+        popoutWindow?.delegate = nil
         coordinator = nil
         sidebarWindow?.close(); sidebarWindow = nil
         popoutWindow?.close();  popoutWindow  = nil
     }
 
-    private func makePopoutWindow() -> NSWindow {
+    private func makePopoutWindow(coordinator: PopoutCoordinator) -> NSWindow {
         let vs     = manager.videoStream.videoSize
         let ratio: CGFloat = vs.width > 0 ? vs.width / vs.height : 9.0 / 16.0
         let winH: CGFloat  = 640
@@ -251,10 +255,14 @@ private struct PhonePanelView: View {
         var windowRef: NSWindow? = nil
 
         let rootView = PopoutView(
-            manager:   manager,
+            manager:     manager,
+            coordinator: coordinator,
             onRetreat: { retreatViewport() },
             onToolbarExpand: { expanded in
                 guard let w = windowRef else { return }
+                // Skip while fullscreen — frame dimensions are screen-sized there and
+                // would corrupt the stored aspect ratio used to snap back on exit.
+                guard !w.styleMask.contains(.fullScreen) else { return }
                 let delta: CGFloat = expanded ? controlBarHeight : -controlBarHeight
                 // contentAspectRatio must include the toolbar height so resize-dragging
                 // maintains the correct phone ratio when the bar is visible.
@@ -281,7 +289,8 @@ private struct PhonePanelView: View {
         )
         window.title                      = manager.connectedDevice ?? "Phone"
         window.contentView                = hosting
-        window.backgroundColor            = .black
+        window.backgroundColor            = .clear
+        window.isOpaque                   = false
         window.isReleasedWhenClosed       = false
         window.titlebarAppearsTransparent = true
         window.titleVisibility            = .hidden
@@ -291,6 +300,7 @@ private struct PhonePanelView: View {
         }
         // Keep the phone's aspect ratio as the user resizes the popout window.
         window.contentAspectRatio         = NSSize(width: ratio, height: 1)
+        window.collectionBehavior         = [.managed, .fullScreenPrimary]
         window.center()
         window.makeKeyAndOrderFront(nil)
         windowRef = window   // allow the toolbar-expand callback to reference this window
@@ -2532,35 +2542,49 @@ private struct LogEntryRowView: View {
     }
 }
 
+
 // MARK: - PopoutCoordinator
 
 /// Manages the floating hardware-control sidebar window relative to the popout phone window.
-///
-/// Responsibilities:
-///   • Repositions the sidebar whenever the popout window moves.
-///   • Fades the sidebar to 0 alpha while the popout is being dragged, restores after settle.
-///   • Fades the sidebar to 0.35 alpha after 4 s of idle interaction.
-///   • Hides the sidebar when the popout loses key status; shows it when key is regained.
-///   • Hides / shows the sidebar on miniaturize / deminiaturize.
-final class PopoutCoordinator: NSObject, NSWindowDelegate {
+/// Also detects fullscreen transitions so PopoutView can show/hide the embedded bottom controls.
+final class PopoutCoordinator: NSObject, NSWindowDelegate, ObservableObject {
+
+    @Published private(set) var isFullscreen: Bool = false
+    @Published private(set) var isPinned: Bool = false
+
+    /// Kept in sync by PhonePanelView so the exit-fullscreen snap uses the true video ratio.
+    var videoRatio: CGFloat = 9.0 / 16.0
+    /// Height of the window just before entering fullscreen.
+    private var preFSHeight: CGFloat = 640
 
     private(set) weak var sidebarWindow: NSWindow?
+    private weak var popoutWindow: NSWindow?
     private var idleTimer:   Timer?
     private var settleTimer: Timer?
     private var isDragging = false
     private var eventMonitor: Any?
 
+    func togglePin() {
+        guard let w = popoutWindow else { return }
+        isPinned.toggle()
+        w.level = isPinned ? .floating : .normal
+    }
+
     func setup(popout: NSWindow, sidebar: NSWindow) {
+        popoutWindow  = popout
         sidebarWindow = sidebar
         popout.delegate = self
 
-        // Observe window-will-move (drag start) — no delegate method for this.
         NotificationCenter.default.addObserver(
             self, selector: #selector(handleWillMove(_:)),
             name: NSWindow.willMoveNotification, object: popout
         )
+        // Reposition sidebar when the popout resizes (e.g. device rotation).
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(handleDidResize(_:)),
+            name: NSWindow.didResizeNotification, object: popout
+        )
 
-        // Reset idle timer on any mouse activity in the sidebar.
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .rightMouseDown]) { [weak self] event in
             if event.window === self?.sidebarWindow { self?.resetIdleTimer() }
             return event
@@ -2569,7 +2593,6 @@ final class PopoutCoordinator: NSObject, NSWindowDelegate {
         resetIdleTimer()
     }
 
-    /// Called by sidebar buttons to reset the idle-fade timer.
     func sidebarDidInteract() { resetIdleTimer() }
 
     deinit {
@@ -2581,10 +2604,55 @@ final class PopoutCoordinator: NSObject, NSWindowDelegate {
 
     // MARK: NSWindowDelegate
 
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        // Save the pre-fullscreen height so we can restore to it exactly on exit.
+        if let popout = notification.object as? NSWindow {
+            preFSHeight = popout.frame.height
+        }
+        isFullscreen = true
+        // Hide the sidebar — controls move inside the window as a bottom bar.
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            sidebarWindow?.animator().alphaValue = 0
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.sidebarWindow?.orderOut(nil)
+        }
+    }
+
+    func windowDidExitFullScreen(_ notification: Notification) {
+        isFullscreen = false
+        guard let popout = notification.object as? NSWindow else { return }
+
+        // Snap window to the saved pre-fullscreen height × current video ratio.
+        // We deliberately ignore contentAspectRatio here — it may have been corrupted
+        // by the onToolbarExpand callback reading screen-sized dimensions during fullscreen.
+        let targetH = preFSHeight
+        let targetW = (targetH * videoRatio).rounded()
+        var f = popout.frame
+        let dx = ((f.size.width - targetW) / 2).rounded()
+        f.size.width  = targetW
+        f.size.height = targetH
+        f.origin.x   += dx
+        popout.setFrame(f, display: true, animate: false)
+        // Re-lock the aspect ratio to the phone's current ratio (no toolbar offset —
+        // the toolbar auto-hides, so the window's natural ratio is the phone's ratio).
+        popout.contentAspectRatio = NSSize(width: videoRatio, height: 1)
+
+        // Restore the sidebar next to the (now-windowed) popout.
+        sidebarWindow?.alphaValue = 0
+        sidebarWindow?.orderFront(nil)
+        repositionSidebar(relativeTo: popout)
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.3
+            sidebarWindow?.animator().alphaValue = 1.0
+        }
+        resetIdleTimer()
+    }
+
     func windowDidMove(_ notification: Notification) {
         guard let popout = notification.object as? NSWindow else { return }
         repositionSidebar(relativeTo: popout)
-        // Debounce: restore sidebar alpha shortly after dragging stops.
         settleTimer?.invalidate()
         settleTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
             guard let self, self.isDragging else { return }
@@ -2607,12 +2675,13 @@ final class PopoutCoordinator: NSObject, NSWindowDelegate {
     }
 
     func windowDidBecomeKey(_ notification: Notification) {
+        guard !isFullscreen else { return }
         sidebarWindow?.orderFront(nil)
         resetIdleTimer()
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        // Only hide if focus moved to a window other than the sidebar itself.
+        guard !isFullscreen else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             if NSApp.keyWindow !== self.sidebarWindow {
@@ -2621,7 +2690,12 @@ final class PopoutCoordinator: NSObject, NSWindowDelegate {
         }
     }
 
-    // MARK: Drag detection
+    // MARK: Resize / drag detection
+
+    @objc private func handleDidResize(_ notification: Notification) {
+        guard !isFullscreen, let popout = notification.object as? NSWindow else { return }
+        repositionSidebar(relativeTo: popout)
+    }
 
     @objc private func handleWillMove(_ notification: Notification) {
         isDragging = true
@@ -2740,62 +2814,68 @@ private struct TrafficLightController: NSViewRepresentable {
 
 private struct PopoutView: View {
 
-    @ObservedObject var manager:  ScrcpyManager
+    @ObservedObject var manager:     ScrcpyManager
+    @ObservedObject var coordinator: PopoutCoordinator
     @Environment(WindowManager.self) private var windowManager
     let onRetreat:       () -> Void
     /// Called when the toolbar is shown/hidden so the window can grow/shrink upward.
     let onToolbarExpand: (Bool) -> Void
 
-    @State private var showLogPanel    = false
-    @State private var toolbarVisible  = false
+    @State private var showLogPanel     = false
+    @State private var toolbarVisible   = false
     @State private var toolbarHideTask: Task<Void, Never>? = nil
-    @Namespace private var ns
 
     var body: some View {
         VStack(spacing: 0) {
             // ── Hover-reveal title bar ─────────────────────────────────────────
-            // Sits above the video; the window grows upward to accommodate it,
-            // so the phone viewport never shifts on screen.
+            // Dark pill that sits above the video (Simulator-style).
+            // Window grows upward to accommodate it; phone viewport never shifts.
             if toolbarVisible {
                 ZStack {
+                    // Dark pill — same width as the video, 6 pt gap below it.
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color(white: 0.15))
+                        .padding(.bottom, 6)
+
                     WindowDragArea()
+
                     HStack(spacing: 0) {
+                        // Traffic-light clearance
                         Color.clear.frame(width: 76)
-                        Spacer()
-                        GlassEffectContainer(spacing: 6) {
-                            HStack(spacing: 6) {
-                                ToolbarButton(icon: "pip.exit", help: "Restore to Main Window") { onRetreat() }
-                                    .glassEffectID("retreat", in: ns)
-                                ToolbarButton(icon: "doc.text.magnifyingglass", help: "Debug Logs") { showLogPanel.toggle() }
-                                    .glassEffectID("logs", in: ns)
-                                ToolbarButton(icon: windowManager.isPinned ? "pin.fill" : "pin",
-                                              help: windowManager.isPinned ? "Unpin" : "Always on Top",
-                                              tint: windowManager.isPinned ? .yellow : nil) {
-                                    windowManager.toggleAlwaysOnTop()
-                                }
-                                .glassEffectID("pin", in: ns)
-                                ToolbarButton(
-                                    icon: manager.audioEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
-                                    help: manager.audioEnabled ? "Disable Audio" : "Enable Audio",
-                                    tint: manager.audioEnabled ? nil : .orange
-                                ) {
-                                    manager.audioEnabled.toggle()
-                                }
-                                .glassEffectID("audio", in: ns)
-                                ToolbarButton(icon: "camera", help: "Screenshot") { manager.takeScreenshot() }
-                                    .glassEffectID("screenshot", in: ns)
-                                ToolbarButton(icon: "stop.circle.fill", help: "Disconnect", tint: .red) {
-                                    Task { await manager.disconnect() }
-                                }
-                                .glassEffectID("disconnect", in: ns)
+
+                        // Device name
+                        Text(manager.connectedDevice ?? "Phone")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+
+                        Spacer(minLength: 8)
+
+                        // Plain icon buttons — no glass, no circles
+                        HStack(spacing: 0) {
+                            titleBtn("pip.exit", "Restore to Main Window") { onRetreat() }
+                            titleBtn("doc.text.magnifyingglass", "Debug Logs") { showLogPanel.toggle() }
+                            titleBtn(coordinator.isPinned ? "pin.fill" : "pin",
+                                     coordinator.isPinned ? "Unpin" : "Always on Top",
+                                     tint: coordinator.isPinned ? .yellow : nil) {
+                                coordinator.togglePin()
                             }
-                            .padding(.trailing, 8)
+                            titleBtn(manager.audioEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill",
+                                     manager.audioEnabled ? "Disable Audio" : "Enable Audio",
+                                     tint: manager.audioEnabled ? nil : .orange) {
+                                manager.audioEnabled.toggle()
+                            }
+                            titleBtn("camera", "Screenshot") { manager.takeScreenshot() }
+                            titleBtn("stop.circle.fill", "Disconnect", tint: .red) {
+                                Task { await manager.disconnect() }
+                            }
                         }
+                        .padding(.trailing, 10)
                     }
                 }
                 .frame(height: controlBarHeight)
-                .background(.ultraThinMaterial)
-                .transition(.opacity)
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
 
             // ── Phone video viewport ───────────────────────────────────────────
@@ -2811,7 +2891,17 @@ private struct PopoutView: View {
                 .frame(width: fw, height: fh)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color.black)
+
+            // ── Fullscreen controls bar ────────────────────────────────────────
+            // Only shown in landscape fullscreen. Lives in the VStack so the video
+            // never overlaps it — the GeometryReader shrinks to give it room.
+            if coordinator.isFullscreen {
+                fullscreenControlsBar
+                    .padding(.vertical, 12)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
         // Hover detection — transparent, clicks pass through to video / buttons.
         .overlay(alignment: .top) {
@@ -2836,10 +2926,24 @@ private struct PopoutView: View {
         }
         .ignoresSafeArea(edges: .all)
         .animation(.easeInOut(duration: 0.22), value: toolbarVisible)
+        .animation(.smooth(duration: 0.3), value: coordinator.isFullscreen)
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showLogPanel)
         .onChange(of: toolbarVisible) { _, expanded in onToolbarExpand(expanded) }
         .preferredColorScheme(.dark)
-        .background(Color.black)
+    }
+
+    // MARK: Title bar button
+
+    private func titleBtn(_ icon: String, _ tip: String, tint: Color? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(tint ?? .secondary)
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(tip)
     }
 
     // MARK: Toolbar hover-reveal
@@ -2865,6 +2969,51 @@ private struct PopoutView: View {
                 withAnimation(.easeInOut(duration: 0.22)) { toolbarVisible = false }
             }
         }
+    }
+
+    // MARK: Fullscreen controls bar
+
+    private var fullscreenControlsBar: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    fsCtrlPill {
+                        fsCtrlBtn("speaker.plus",  "Vol +") { manager.controlSocket.sendVolumeUp() }
+                        fsCtrlBtn("speaker.minus", "Vol −") { manager.controlSocket.sendVolumeDown() }
+                        fsCtrlBtn("speaker.slash", "Mute")  { manager.controlSocket.sendMute() }
+                    }
+                    fsCtrlPill {
+                        fsCtrlBtn("arrow.left",   "Back")    { manager.controlSocket.sendBackButton() }
+                        fsCtrlBtn("house",         "Home")    { manager.controlSocket.sendHomeButton() }
+                        fsCtrlBtn("square.stack",  "Recents") { manager.controlSocket.sendAppSwitch() }
+                    }
+                    fsCtrlPill {
+                        fsCtrlBtn("power",        "Power")  { manager.controlSocket.sendPowerButton() }
+                        fsCtrlBtn("rotate.right", "Rotate") { manager.controlSocket.sendRotateDevice() }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func fsCtrlPill<C: View>(@ViewBuilder content: () -> C) -> some View {
+        HStack(spacing: 2) { content() }
+            .padding(.horizontal, 6).padding(.vertical, 6)
+            .glassEffect(.regular.interactive(), in: Capsule())
+    }
+
+    private func fsCtrlBtn(_ icon: String, _ tip: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .regular))
+                .frame(width: 32, height: 32)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(tip)
     }
 
     private func fitSize(in available: CGSize, ratio: CGFloat) -> (CGFloat, CGFloat) {
