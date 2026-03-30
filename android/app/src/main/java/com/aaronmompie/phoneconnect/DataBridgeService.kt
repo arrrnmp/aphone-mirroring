@@ -17,6 +17,7 @@ import android.os.Build
 import android.net.Uri
 import android.os.IBinder
 import android.provider.CallLog
+import android.provider.Settings
 import android.provider.Telephony
 import android.telecom.TelecomManager
 import android.util.Base64
@@ -142,7 +143,7 @@ class DataBridgeService : Service() {
         val ss = try {
             ServerSocket().also { s ->
                 s.reuseAddress = true
-                s.bind(InetSocketAddress(27184))
+                s.bind(InetSocketAddress("127.0.0.1", 27184))
             }
         } catch (e: Exception) {
             Log.e("DataBridgeService", "Failed to bind port 27184: ${e.message}")
@@ -176,6 +177,31 @@ class DataBridgeService : Service() {
         socket.soTimeout = 45_000  // 45s read timeout — catches dead connections (heartbeat is every 20s)
         val reader = BufferedReader(InputStreamReader(socket.getInputStream()))
         val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream()))
+
+        // Verify the per-session token sent by the Mac as the first message.
+        // The Mac writes the token via `adb shell settings put secure aphone_bridge_token TOKEN`
+        // before connecting. Settings.Secure is writable by ADB (shell UID) and readable by
+        // this app via ContentResolver — no unreliable intent extras needed.
+        val expectedToken = Settings.Secure.getString(contentResolver, "aphone_bridge_token")
+            ?.takeIf { it.length == 32 }
+        if (expectedToken == null) {
+            Log.w("DataBridgeService", "Rejected connection: no session token configured (Mac not connected yet)")
+            socket.close()
+            return
+        }
+        val authLine = runCatching {
+            kotlinx.coroutines.runInterruptible(Dispatchers.IO) { reader.readLine() }
+        }.getOrNull()
+        val authObj = runCatching {
+            Json.parseToJsonElement(authLine ?: "").jsonObject
+        }.getOrNull()
+        val sentToken = authObj?.get("token")?.jsonPrimitive?.contentOrNull
+        if (authObj?.get("type")?.jsonPrimitive?.contentOrNull != "auth" || sentToken != expectedToken) {
+            Log.w("DataBridgeService", "Rejected connection: bad or missing auth token")
+            socket.close()
+            return
+        }
+
         activeWriter = writer
         updateNotification(connected = true)
         try {

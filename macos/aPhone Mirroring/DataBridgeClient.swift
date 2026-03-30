@@ -45,6 +45,7 @@ final class DataBridgeClient: ObservableObject {
     nonisolated(unsafe) static var shared: DataBridgeClient?
 
     private var notifCategories: Set<String> = []   // category IDs already registered
+    private var sessionToken: String = ""
 
     private var currentSerial: String?
     private weak var manager: ScrcpyManager?
@@ -66,6 +67,14 @@ final class DataBridgeClient: ObservableObject {
         guard let manager else { return }
         let serial = currentSerial
         let serialArgs: [String] = serial.map { ["-s", $0] } ?? []
+        // Generate a fresh session token and write it to Android Settings.Secure via ADB.
+        // The service reads this value via ContentResolver on every incoming connection —
+        // more reliable than intent extras for an already-running foreground service.
+        // settings put secure requires the ADB shell UID (WRITE_SECURE_SETTINGS), so no
+        // other Mac process can write it without USB debug access.
+        sessionToken = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        _ = await manager.adb(serialArgs + ["shell", "settings", "put", "secure",
+                                             "aphone_bridge_token", sessionToken])
         _ = await manager.adb(serialArgs + ["shell", "am", "start-foreground-service",
                                              "-n", "com.aaronmompie.phoneconnect/.DataBridgeService"])
         _ = await manager.adb(serialArgs + ["forward", "--remove", "tcp:27184"])
@@ -129,7 +138,11 @@ final class DataBridgeClient: ObservableObject {
             log("DataBridge: connected to Android data service", level: .ok)
         }
 
-        // Bootstrap: ping first, then fetch all data on pong
+        // Authenticate first — Android service checks this token before accepting commands.
+        let token = await MainActor.run { sessionToken }
+        sendRaw(conn: conn, json: "{\"type\":\"auth\",\"token\":\"\(token)\"}")
+
+        // Bootstrap: ping, then fetch all data on pong
         sendRaw(conn: conn, json: #"{"type":"ping"}"#)
 
         // Heartbeat: ping every 20s so the Android service knows the Mac is still there
