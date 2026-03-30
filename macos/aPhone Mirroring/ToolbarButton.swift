@@ -3,8 +3,8 @@
 //  aPhone Mirroring
 //
 //  Unified button used in both the title-bar toolbar and the hardware-control panel.
-//  Use .glass for 32×32 interactive glass-circle buttons (title bar / hover toolbar).
-//  Use .panel for 44×44 plain buttons (ControlPanelView hardware controls).
+//  Use .glass for 36×36 interactive glass-circle buttons (title bar / hover toolbar).
+//  Use .panel for 36×36 plain buttons (ControlPanelView hardware controls).
 //
 
 import SwiftUI

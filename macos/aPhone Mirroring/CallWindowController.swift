@@ -141,7 +141,7 @@ struct CallView: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.primary)
                     Text("Phone Bluetooth Settings → tap your Mac → turn on Call Audio")
-                        .font(.system(size: 10))
+                        .font(.system(size: 11))
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.center)
                     Button {
