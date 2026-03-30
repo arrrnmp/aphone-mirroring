@@ -1191,7 +1191,7 @@ private struct ConversationPanel: View {
     // Plain fill input bar — avoids glass-on-glass inside the panel
     private var messageInputBar: some View {
         HStack(spacing: 8) {
-            TextField("iMessage", text: $draftText)
+            TextField("Text Message", text: $draftText)
                 .textFieldStyle(.plain)
                 .font(.system(size: 13))
                 .padding(.horizontal, 12)
