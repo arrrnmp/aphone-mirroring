@@ -1039,11 +1039,14 @@ private struct ThreadListPanel: View {
                     Image(systemName: "square.and.pencil")
                         .font(.system(size: 14, weight: .medium))
                         .foregroundStyle(.secondary)
-                        .frame(width: 30, height: 30)
+                        .frame(width: 34, height: 34)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("New Message")
+                .onHover { hovering in
+                    if hovering { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
             }
 
             ScrollView(.vertical, showsIndicators: false) {
