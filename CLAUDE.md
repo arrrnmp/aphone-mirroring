@@ -139,7 +139,7 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 **Phone panel title bar** (46pt, in `PhonePanelView`):
 - `WindowDragArea` makes the bar draggable
 - Always-visible traffic-light clearance (76pt spacer) + device label + glass utility buttons
-- Button order (consistent with popout toolbar): Pop-out → Logs → Pin → Screenshot (when connected) → Disconnect (when connected)
+- Button order (consistent with popout toolbar): Pop-out → Logs → Pin → Audio (when connected) → Screenshot (when connected) → Disconnect (when connected)
 - When popped out: only a "Restore" (`pip.exit`) button remains in the main window title bar
 - All buttons use `ToolbarButton(.glass)` — 36×36 interactive glass circles inside a `GlassEffectContainer`
 
@@ -149,13 +149,13 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - Traffic lights hidden at launch (alphaValue 0); hover-reveal toolbar restores them
 - `contentAspectRatio` locked to the phone's native ratio; updated on rotation via `onChange(of: videoSize)` with orientation-flip resize animation
 - `onToolbarExpand` closure updates `contentAspectRatio` to include `controlBarHeight` when toolbar is visible, so user drag-resize always maintains the phone's ratio
-- Hosts `PopoutView(manager:onRetreat:onToolbarExpand:)` — takes the full `ScrcpyManager` directly (not individual stream/socket callbacks), so it can access `videoStream`, `controlSocket`, `pushFiles`, `disconnect`, `takeScreenshot`, and `screenshotFlash` without threading extra closures through `makePopoutWindow`
+- Hosts `PopoutView(manager:coordinator:onRetreat:onToolbarExpand:)` — takes the full `ScrcpyManager` and `PopoutCoordinator` directly, so it can access `videoStream`, `controlSocket`, `pushFiles`, `disconnect`, `takeScreenshot`, `screenshotFlash`, and observe `coordinator.isFullscreen`/`isPinned` without threading extra closures through `makePopoutWindow`
 
 **Hover-reveal toolbar** (in `PopoutView`):
 - `ToolbarHoverArea` NSViewRepresentable overlaid on the full view, tracking-area covers top 50pt
 - Mouse enters top 50pt → `toolbarVisible = true`, traffic lights fade in; 0.8s after last enter → fade out
 - `TrafficLightController` NSViewRepresentable syncs traffic-light alphaValue with `toolbarVisible`
-- Button order matches main panel: Retreat → Logs → Pin → Screenshot → Disconnect
+- Button order matches main panel: Retreat → Logs → Pin → Audio → Screenshot → Disconnect
 
 **Right panel tab bar** (in `ContentPanelView`):
 - Layout is `VStack`: tab bar at top, content fills remaining height. No bottom floating bar.
@@ -182,40 +182,57 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - Each tab view uses `.onGeometryChange(for: CGFloat.self, of: \.size.width)` to clamp `sidebarWidth` when the window shrinks, ensuring the right panel always has at least 220 pt.
 
 **Messages tab** (in `ContentView.swift`):
-- Two-panel split: left = `ThreadListPanel` (thread list + search), right = `ConversationPanel` (contact header + message history + input bar).
+- Two-panel split: left = `ThreadListPanel` (thread list + search + compose button), right = `ConversationPanel` (contact header + message history + input bar).
 - Both panels use `Color(white: 0.17)` fill + `clipShape(RoundedRectangle(cornerRadius: 16))` — no glass.
 - Sidebar width received as `@Binding var listWidth`, clamped 160–340 pt via `PanelResizeDivider`.
 - Search bar inside left panel: plain `.fill(.white.opacity(0.08))` rounded rect.
+- Compose button (`square.and.pencil`): 34×34pt, `.buttonStyle(.plain)`, `NSCursor.pointingHand` on hover.
 - Selected thread row: `Color.accentColor.opacity(0.15)` fill; unread badge: `Color.accentColor`.
-- Conversation: `ScrollViewReader` scrolls to the last message `onAppear`. Input bar uses a plain capsule fill; send button uses `Color.accentColor`.
-- Received message bubbles: `.white.opacity(0.12)` fill. Sent: `Color.blue` fill.
-- `fakeConversation(for:)` free function maps thread name → `[FakeMessage]`.
+- Loading state: `ProgressView` + "Loading messages…" label (no bare spinner).
+- Conversation: `ScrollViewReader` scrolls to the last message `onAppear`. Messages come from `bridge.messages[thread.threadId]`. Input bar uses a plain capsule fill with placeholder "Text Message"; send button uses `Color.accentColor`.
+- Received message bubbles: `.white.opacity(0.12)` fill. Sent: `Color.blue` fill. Timestamp labels at 11pt.
+- Day grouping via `groupedByDay(_:)` + `DayDivider`. New-conversation flow via `NewConversationPanel`.
 
 **Photos tab** (in `ContentView.swift`):
 - `LazyVGrid` with `[GridItem(.adaptive(minimum: 130, maximum: 240), spacing: 8)]` — fills available width, each cell 130–240 pt.
 - `ScrollView` uses `Color(white: 0.17)` fill + `clipShape(RoundedRectangle(cornerRadius: 16))` — no glass.
-- Photo cells (`PhotoCell`) are square `Rectangle` fills with a label overlay and `cornerRadius: 12`.
-- Clicking a cell generates an 800×800 PNG in `NSTemporaryDirectory()` from `NSImage(size:flipped:)`, writes it, and opens it in Preview via `NSWorkspace.shared.open(url)`. Cursor shows pointing hand on hover via `onHover` + `NSCursor.pointingHand`.
+- Loading state: `ProgressView` + "Loading photos…" label (no bare spinner).
+- Photo cells (`PhotoCell`): square `Rectangle` fill, thumbnail loaded via `bridge.fetchThumbnail(mediaId:)` on appear, `NSCursor.pointingHand` on hover. Clicking calls `bridge.openFullPhoto(mediaId:)`. Checkmark overlay when `photo.localURL != nil`.
+- Infinite scroll: sentinel `Color.clear` at grid end triggers `bridge.loadMorePhotos()` when it appears.
 
 **Calls tab** (in `ContentView.swift`):
 - Same two-panel split as Messages; both panels use `Color(white: 0.17)` fill — no glass on content panels.
-- Left panel (`CallListPanel`): search bar + scrollable `CallRow` list. Each row shows avatar, name (red if missed), direction icon + duration, time. Selection uses `Color.accentColor.opacity(0.15)`.
-- Sidebar width received as `@Binding var listWidth` from `ContentPanelView` (shared with Messages tab).
+- Left panel (`CallListPanel`): search bar + scrollable `CallRow` list. Each row shows avatar, name (red if missed), direction icon + duration, time. Selection uses `Color.accentColor.opacity(0.15)`. Data from `bridge.calls`.
+- Sidebar width received as `@Binding var listWidth` from `ContentPanelView` (shared with Messages/Contacts tabs).
 - Right panel (`ContactDetailPanel`) — designed to mirror macOS Phone app:
   - `ZStack` with a `LinearGradient` background: contact's hue bleeds from the top (dark tinted, `brightness: 0.28`) and fades to `Color(white: 0.17)` by midpoint.
   - Large 90 pt avatar with a **colored glow shadow** matching the contact hue (not a generic black shadow).
-  - **Action buttons** (Message / Call / Video): each is a Liquid Glass circle — `Button` with `.glassEffect(.regular.interactive(), in: Circle())`, icon inside, text label below. All three wrapped in `GlassEffectContainer(spacing: 16)`.
+  - **Action buttons** (Message / Call / Other): each is a Liquid Glass circle — `Button` with `.glassEffect(.regular.interactive(), in: Circle())`, icon inside, text label below. All three wrapped in `GlassEffectContainer(spacing: 16)`. "Other" shows a `popover` with `AppActionsMenu` — third-party app actions from `bridge.contactApps`.
   - **Liquid Glass segmented control** (Details / Recent Calls): two glass pills inside `GlassEffectContainer(spacing: 2)` with `glassEffectID` morphing via `@Namespace var detailNS`. Switches tab content with `.smooth(duration: 0.25)`.
   - Section content (Details rows, Recent Calls rows) in `Color(white: 0.20)` rounded cards — plain fills, no glass.
-- `fakeCalls` contains 10 entries (some contacts appear multiple times for history).
-- `fakePhone()` / `fakeEmail()` generate deterministic fake contact info from `call.hue`.
+
+**Contacts tab** (in `ContentView.swift`):
+- Same two-panel split as Messages/Calls; both panels use `Color(white: 0.17)` fill — no glass on content panels.
+- Left panel (`ContactListPanel`): search bar + scrollable `ContactRow` list. Each row shows hue-tinted avatar, name, first phone number. Data from `bridge.contacts`. Sidebar width shared via `@Binding var listWidth`.
+- Right panel (`ContactInfoPanel`): identical layout to `ContactDetailPanel` in the Calls tab.
+  - `LinearGradient` background with contact hue tint fading to `Color(white: 0.17)`.
+  - 90 pt avatar with colored glow shadow. Contact name at 22pt bold.
+  - Action buttons (Message / Call / Other) — same glass circles + `GlassEffectContainer` as Calls tab.
+  - `infoSection(title:content:)` helper renders each section: uppercase 11pt title label above a `Color(white: 0.20)` rounded card. Sections shown: Organisation, Phone, Email, Birthday, Address, Website, Notes (each only when non-nil/non-empty).
+  - Phone numbers deduplicated by digits-only comparison before rendering.
+  - Email rows are tappable — open `mailto:` URL in default Mail app.
 
 **Control Panel** (floating side window alongside the popout):
 - Borderless `NSWindow` hosting `ControlPanelView` SwiftUI view
 - 9 buttons: Back, Home, Recents, Volume Up, Volume Down, Mute, Power, Rotate
-- **`PopoutCoordinator`** (`NSWindowDelegate` on the popout window) manages the sidebar's lifetime:
+- **`PopoutCoordinator`** (`NSWindowDelegate` + `ObservableObject` on the popout window) manages the sidebar's lifetime and publishes state to `PopoutView`:
+  - `@Published isFullscreen` — drives the fullscreen bottom controls bar in `PopoutView`
+  - `@Published isPinned` — drives the pin button tint in `PopoutView`'s toolbar; `togglePin()` sets the **popout** window level (`.floating` / `.normal`). The main window's `WindowManager.toggleAlwaysOnTop()` is **not used** from the popout — they are independent.
   - `NSWindow.willMoveNotification` → fade sidebar to 0 (drag start)
   - `windowDidMove` → reposition sidebar + 0.15s debounce to restore alpha
+  - `NSWindow.didResizeNotification` → reposition sidebar (handles device rotation resizes), guarded by `!isFullscreen`
+  - `windowWillEnterFullScreen` → save `preFSHeight`, set `isFullscreen = true`, fade out + orderOut sidebar
+  - `windowDidExitFullScreen` → snap window via `preFSHeight × videoRatio`, reset `contentAspectRatio`, restore + fade in sidebar
   - `windowDidBecomeKey` / `windowDidResignKey` → show / hide sidebar (`orderFront` / `orderOut`)
   - `windowDidMiniaturize` / `windowDidDeminiaturize` → hide / show sidebar
   - Idle timer: 4s after last interaction → fade to 0.35 alpha; any button tap resets via `onInteraction` callback
