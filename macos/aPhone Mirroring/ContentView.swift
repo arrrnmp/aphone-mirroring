@@ -2266,8 +2266,14 @@ private struct ContactInfoPanel: View {
 
     private func infoSection<Content: View>(title: String,
                                             @ViewBuilder content: () -> Content) -> some View {
-        VStack(spacing: 0) { content() }
-            .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(white: 0.20)))
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title.uppercased())
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 4)
+            VStack(spacing: 0) { content() }
+                .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color(white: 0.20)))
+        }
     }
 
     private func infoRow(icon: String, value: String) -> some View {
