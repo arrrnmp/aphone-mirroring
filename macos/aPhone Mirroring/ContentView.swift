@@ -933,6 +933,9 @@ private struct MessagesTabView: View {
             if bridge.isLoading {
                 ProgressView()
                     .controlSize(.regular)
+                Text("Loading messages…")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
             } else if bridge.threads.isEmpty {
                 Image(systemName: "message")
                     .font(.system(size: 32, weight: .light))
@@ -1401,6 +1404,9 @@ private struct PhotosTabView: View {
                 VStack(spacing: 12) {
                     if bridge.isLoading {
                         ProgressView().controlSize(.regular)
+                        Text("Loading photos…")
+                            .font(.system(size: 13))
+                            .foregroundStyle(.secondary)
                     } else {
                         Image(systemName: "photo.on.rectangle.angled")
                             .font(.system(size: 32, weight: .light))
