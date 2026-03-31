@@ -58,7 +58,7 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 2. Launch **aPhone Mirroring** on your Mac — it detects the device and starts mirroring automatically.
 3. Install the Android companion app to unlock Messages, Calls, Photos, Contacts, and Notifications.
 
-See [`macos/CLAUDE.md`](macos/CLAUDE.md) for the full architecture, protocol details, and UI design rules.
+See [`CLAUDE.md`](CLAUDE.md) for the full architecture, protocol details, and UI design rules.
 
 ---
 
