@@ -48,7 +48,7 @@ All source files are in `aPhone Mirroring/aPhone MIrroring/`.
 | `NWConnectionExtensions.swift` | Protocol helpers: async `receiveExactly()` on `NWConnection`, big-endian `Data` readers. |
 | `DataBridgeClient.swift` | TCP client connecting to the Android `DataBridgeService` companion app on port 27184 (forwarded via `adb forward`). Fetches real SMS threads, messages, call log, photos, and contacts. Delivers Android push notifications to macOS Notification Center with actionable reply support. Handles `activeCall` state and `callAudioError`. Auto-retries with exponential backoff on disconnect. |
 | `DataBridgeModels.swift` | Swift models mirroring the Android bridge models: `BridgeThread`, `BridgeMessage`, `BridgeCall`, `BridgePhoto`, `BridgeContact`, `BridgeContactApp`, `BridgeCallState`, `BridgeRelativeDate`. All `Codable` for JSON decode over the TCP bridge. |
-| `BluetoothPairingManager.swift` | Detects whether the Android device is paired via Classic Bluetooth (required for HFP call-audio routing). Uses `IOBluetooth` to look up the device by BT address read from ADB, then calls `requestAuthentication()` to trigger the macOS pairing dialog. Polls `isPaired()` every 2 s (60 s timeout). All IOBluetooth calls dispatched to `DispatchQueue.main`. |
+| `BluetoothPairingManager.swift` | Detects whether the Android device is paired via Classic Bluetooth (required for HFP call-audio routing). Reads the phone's BT address via ADB, then queries `system_profiler SPBluetoothDataType -json` to check if that address appears in macOS's paired-device list. Pairing is initiated by making the phone discoverable via ADB and opening macOS Bluetooth System Settings (`x-apple.systempreferences:com.apple.BluetoothSettings`) for the user to complete. Polls `system_profiler` every 2 s (60 s timeout). **Does not use `IOBluetooth`** — that framework is removed on macOS 26. |
 | `CallWindowController.swift` | Singleton that manages a floating borderless `NSWindow` shown during active calls. Hosts `CallView` — a Liquid Glass card with contact name, call status, elapsed timer, and glass circle action buttons (Mute, End, Mac Audio, Phone Audio). Positioned top-right of the main screen with a 12 pt margin. |
 
 **Connection flow** (in `ScrcpyManager.performConnect`):
@@ -109,10 +109,10 @@ All source files are in `aPhone Mirroring/aPhone MIrroring/`.
 **Bluetooth pairing flow** (in `BluetoothPairingManager`):
 1. After USB connect: `checkAndPair(adbPath:serial:)` called
 2. Phone's BT address read via `adb shell settings get secure bluetooth_address`
-3. `IOBluetoothDevice(addressString:).isPaired()` decides status
-4. If paired: `openConnection(nil)` to establish HFP link; status → `.paired`
-5. If not paired: UI shows banner; user taps "Pair Now" → `startPairing()` makes phone discoverable for 120 s via ADB intent, then calls `requestAuthentication()` → macOS pairing dialog appears
-6. Background task polls `isPaired()` every 2 s for up to 60 s; on success → `.paired`; on timeout → `.notPaired`
+3. `system_profiler SPBluetoothDataType -json` output checked for the address → determines paired/not-paired (covers both currently-connected and known-but-disconnected devices via `device_connected` / `device_not_connected` sections)
+4. If paired: status → `.paired`
+5. If not paired: UI shows banner; user taps "Pair Now" → `startPairing()` makes phone discoverable for 120 s via ADB intent, opens `x-apple.systempreferences:com.apple.BluetoothSettings` for the user to complete pairing
+6. Background task re-runs `system_profiler` every 2 s for up to 60 s; on address appearing → `.paired`; on timeout → `.notPaired`
 
 **Active call window** (in `CallWindowController` + `CallView`):
 - `CallWindowController.shared` is a singleton; `show(call:bridge:)` creates or updates the window
