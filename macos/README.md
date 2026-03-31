@@ -97,7 +97,7 @@ xcodebuild -scheme "Scrcpy SwiftUI" -configuration Debug -destination 'platform=
 
 ## Architecture
 
-See [CLAUDE.md](CLAUDE.md) for a detailed breakdown of every component, the scrcpy protocol, data bridge protocol, state management patterns, and UI design rules.
+See [CLAUDE.md](../CLAUDE.md) for a detailed breakdown of every component, the scrcpy protocol, data bridge protocol, state management patterns, and UI design rules.
 
 ---
 
