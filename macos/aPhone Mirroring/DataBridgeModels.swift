@@ -51,11 +51,8 @@ struct BridgeMessage: Identifiable, Codable {
     var id: Int64 { messageId }
 
     var timeLabel: String {
-        let date = Date(timeIntervalSince1970: timestamp / 1000.0)
-        let formatter = DateFormatter()
-        formatter.timeStyle = .short
-        formatter.dateStyle = .none
-        return formatter.string(from: date)
+        static let fmt: DateFormatter = { let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none; return f }()
+        return fmt.string(from: Date(timeIntervalSince1970: timestamp / 1000.0))
     }
 }
 
@@ -213,15 +210,10 @@ enum BridgeRelativeDate {
         let cal = Calendar.current
         if cal.isDateInYesterday(date) { return "Yesterday" }
 
-        if interval < 7 * 86400 {
-            let fmt = DateFormatter()
-            fmt.dateFormat = "EEE"
-            return fmt.string(from: date)
-        }
+        static let weekdayFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE"; return f }()
+        static let dateFmt: DateFormatter    = { let f = DateFormatter(); f.dateStyle = .short; f.timeStyle = .none; return f }()
 
-        let fmt = DateFormatter()
-        fmt.dateStyle = .short
-        fmt.timeStyle = .none
-        return fmt.string(from: date)
+        if interval < 7 * 86400 { return weekdayFmt.string(from: date) }
+        return dateFmt.string(from: date)
     }
 }

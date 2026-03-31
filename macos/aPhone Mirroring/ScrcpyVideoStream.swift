@@ -35,6 +35,7 @@ final class ScrcpyVideoStream: ObservableObject {
     // This avoids the deadlock that occurs when creating a VT session on @MainActor on demand.
     private var captureSession: VTDecompressionSession?
     private var latestDecodedBuffer: CVPixelBuffer?
+    private lazy var ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     // Counters for log
     private var configPacketCount = 0
@@ -365,9 +366,8 @@ final class ScrcpyVideoStream: ObservableObject {
     /// No command is sent to the device.
     func captureCurrentFrame() -> CGImage? {
         guard let pb = latestDecodedBuffer else { return nil }
-        let ci  = CIImage(cvPixelBuffer: pb)
-        let ctx = CIContext(options: [.useSoftwareRenderer: false])
-        return ctx.createCGImage(ci, from: ci.extent)
+        let ci = CIImage(cvPixelBuffer: pb)
+        return ciContext.createCGImage(ci, from: ci.extent)
     }
 
     // MARK: - Capture session lifecycle

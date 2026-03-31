@@ -412,15 +412,6 @@ private struct PhonePanelView: View {
         }
     }
 
-    private func fitSize(in available: CGSize, ratio: CGFloat) -> (CGFloat, CGFloat) {
-        let availRatio = available.width / available.height
-        if availRatio > ratio {
-            return (available.height * ratio, available.height)
-        } else {
-            return (available.width, available.width / ratio)
-        }
-    }
-
     private func phoneStateCard(
         icon: String,
         iconTint: Color? = nil,
@@ -517,52 +508,8 @@ private struct PhonePanelView: View {
     // MARK: Controls — three glass-pill groups displayed in one row
 
     private var controlsSection: some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 0)
-            GlassEffectContainer(spacing: 8) {
-                HStack(spacing: 8) {
-                    // Audio: Volume Up / Down / Mute
-                    ctrlPill {
-                        ctrlButton("speaker.plus",  "Vol +") { manager.controlSocket.sendVolumeUp() }
-                        ctrlButton("speaker.minus", "Vol −") { manager.controlSocket.sendVolumeDown() }
-                        ctrlButton("speaker.slash", "Mute")  { manager.controlSocket.sendMute() }
-                    }
-                    // Navigation: Back / Home / Recents
-                    ctrlPill {
-                        ctrlButton("arrow.left",  "Back")    { manager.controlSocket.sendBackButton() }
-                        ctrlButton("house",        "Home")    { manager.controlSocket.sendHomeButton() }
-                        ctrlButton("square.stack", "Recents") { manager.controlSocket.sendAppSwitch() }
-                    }
-                    // Device: Power / Rotate
-                    ctrlPill {
-                        ctrlButton("power",        "Power")  { manager.controlSocket.sendPowerButton() }
-                        ctrlButton("rotate.right", "Rotate") { manager.controlSocket.sendRotateDevice() }
-                    }
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 10)
-    }
-
-    /// A glass-capsule container for a group of hardware-control buttons.
-    private func ctrlPill<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 2) { content() }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 6)
-            .glassEffect(.regular.interactive(), in: Capsule())
-    }
-
-    private func ctrlButton(_ icon: String, _ tip: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .regular))
-                .frame(width: 32, height: 32)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help(tip)
+        HardwareControlsBar(controlSocket: manager.controlSocket)
+            .padding(.vertical, 10)
     }
 }
 
@@ -1376,20 +1323,14 @@ private func groupedByDay(_ messages: [BridgeMessage]) -> [(String, [BridgeMessa
 }
 
 private func messageDayLabel(epochMillis: Double) -> String {
+    static let weekdayFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEEE"; return f }()
+    static let dateFmt: DateFormatter    = { let f = DateFormatter(); f.dateStyle = .medium; f.timeStyle = .none; return f }()
     let date = Date(timeIntervalSince1970: epochMillis / 1000.0)
     let cal = Calendar.current
     if cal.isDateInToday(date)     { return "Today" }
     if cal.isDateInYesterday(date) { return "Yesterday" }
     let daysAgo = cal.dateComponents([.day], from: date, to: Date()).day ?? 0
-    if daysAgo < 7 {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "EEEE"
-        return fmt.string(from: date)
-    }
-    let fmt = DateFormatter()
-    fmt.dateStyle = .medium
-    fmt.timeStyle = .none
-    return fmt.string(from: date)
+    return daysAgo < 7 ? weekdayFmt.string(from: date) : dateFmt.string(from: date)
 }
 
 // MARK: - Photos tab
@@ -2989,52 +2930,7 @@ private struct PopoutView: View {
     // MARK: Fullscreen controls bar
 
     private var fullscreenControlsBar: some View {
-        HStack(spacing: 0) {
-            Spacer(minLength: 0)
-            GlassEffectContainer(spacing: 8) {
-                HStack(spacing: 8) {
-                    fsCtrlPill {
-                        fsCtrlBtn("speaker.plus",  "Vol +") { manager.controlSocket.sendVolumeUp() }
-                        fsCtrlBtn("speaker.minus", "Vol −") { manager.controlSocket.sendVolumeDown() }
-                        fsCtrlBtn("speaker.slash", "Mute")  { manager.controlSocket.sendMute() }
-                    }
-                    fsCtrlPill {
-                        fsCtrlBtn("arrow.left",   "Back")    { manager.controlSocket.sendBackButton() }
-                        fsCtrlBtn("house",         "Home")    { manager.controlSocket.sendHomeButton() }
-                        fsCtrlBtn("square.stack",  "Recents") { manager.controlSocket.sendAppSwitch() }
-                    }
-                    fsCtrlPill {
-                        fsCtrlBtn("power",        "Power")  { manager.controlSocket.sendPowerButton() }
-                        fsCtrlBtn("rotate.right", "Rotate") { manager.controlSocket.sendRotateDevice() }
-                    }
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 8)
-    }
-
-    private func fsCtrlPill<C: View>(@ViewBuilder content: () -> C) -> some View {
-        HStack(spacing: 2) { content() }
-            .padding(.horizontal, 6).padding(.vertical, 6)
-            .glassEffect(.regular.interactive(), in: Capsule())
-    }
-
-    private func fsCtrlBtn(_ icon: String, _ tip: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: icon)
-                .font(.system(size: 15, weight: .regular))
-                .frame(width: 32, height: 32)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help(tip)
-    }
-
-    private func fitSize(in available: CGSize, ratio: CGFloat) -> (CGFloat, CGFloat) {
-        available.width / available.height > ratio
-            ? (available.height * ratio, available.height)
-            : (available.width, available.width / ratio)
+        HardwareControlsBar(controlSocket: manager.controlSocket)
     }
 }
 
@@ -3072,6 +2968,61 @@ private struct ScreenshotFlashView: View {
         }
         .padding(14)
     }
+}
+
+// MARK: - Shared hardware controls bar
+
+private struct HardwareControlsBar: View {
+    let controlSocket: ScrcpyControlSocket
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    pill {
+                        btn("speaker.plus",  "Vol +") { controlSocket.sendVolumeUp() }
+                        btn("speaker.minus", "Vol −") { controlSocket.sendVolumeDown() }
+                        btn("speaker.slash", "Mute")  { controlSocket.sendMute() }
+                    }
+                    pill {
+                        btn("arrow.left",   "Back")    { controlSocket.sendBackButton() }
+                        btn("house",         "Home")    { controlSocket.sendHomeButton() }
+                        btn("square.stack",  "Recents") { controlSocket.sendAppSwitch() }
+                    }
+                    pill {
+                        btn("power",        "Power")  { controlSocket.sendPowerButton() }
+                        btn("rotate.right", "Rotate") { controlSocket.sendRotateDevice() }
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 8)
+    }
+
+    private func pill<C: View>(@ViewBuilder content: () -> C) -> some View {
+        HStack(spacing: 2) { content() }
+            .padding(.horizontal, 6).padding(.vertical, 6)
+            .glassEffect(.regular.interactive(), in: Capsule())
+    }
+
+    private func btn(_ icon: String, _ tip: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .regular))
+                .frame(width: 32, height: 32)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help(tip)
+    }
+}
+
+private func fitSize(in available: CGSize, ratio: CGFloat) -> (CGFloat, CGFloat) {
+    available.width / available.height > ratio
+        ? (available.height * ratio, available.height)
+        : (available.width, available.width / ratio)
 }
 
 // MARK: - Preview

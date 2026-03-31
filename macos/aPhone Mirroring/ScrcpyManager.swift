@@ -534,6 +534,7 @@ final class ScrcpyManager: ObservableObject {
         guard let serial = connectedSerial else { return }
         let output = await adb(["-s", serial, "shell", "dumpsys", "battery"])
         guard let (level, charging) = parseBattery(output) else { return }
+        guard batteryLevel != level || batteryCharging != charging else { return }
         batteryLevel = level
         batteryCharging = charging
         updateStatusBar(level: level, charging: charging)

@@ -11,6 +11,17 @@
 //    causing the crackling heard with USB jitter. AVAudioSourceNode never gaps —
 //    the render callback fills from the ring buffer or outputs silence seamlessly.
 //
+//  Real-time safety:
+//    The render callback uses os_unfair_lock_trylock — it never blocks the real-time
+//    audio thread. If the writer holds the lock (s16le→Float32 conversion, ~µs),
+//    the callback outputs silence for that render period and retries next callback
+//    (~10 ms later). This eliminates the priority-inversion crackling that a
+//    blocking os_unfair_lock_lock call caused under USB burst delivery.
+//
+//    The write side performs s16le→Float32 conversion outside the lock into a
+//    pre-allocated scratch buffer, so the lock is held only for the fast Float copy
+//    + index update — minimising contention with the render callback.
+//
 //  scrcpy raw audio format (from AudioConfig.java):
 //    • 12-byte stream header  (codec_id:4 + reserved:8)
 //    • Repeated frames: [pts:8 | size:4] + payload
@@ -26,59 +37,85 @@ import Network
 
 /// Thread-safe SPSC ring buffer for Float32 non-interleaved stereo audio.
 /// Writer: network decode task.  Reader: AVAudioSourceNode render callback.
-/// Lock held only for O(n) sample copy — microsecond durations in practice.
+///
+/// Real-time safety: the render callback uses trylock and outputs silence rather
+/// than blocking if the writer holds the lock. The write side moves s16le→Float32
+/// conversion outside the lock to keep lock hold time as short as possible.
 private final class AudioRingBuffer: @unchecked Sendable {
 
     private let capacity: Int
-    private var L: [Float32]   // left channel
-    private var R: [Float32]   // right channel
+    private var L: [Float32]
+    private var R: [Float32]
     private var writeIdx = 0
     private var readIdx  = 0
-    private var count    = 0   // frames currently buffered
+    private var count    = 0
     private var lock     = os_unfair_lock()
+
+    // Pre-allocated scratch buffers for s16le→Float32 conversion.
+    // Written only by the single writer thread — no races with the reader.
+    private var tempL: [Float32]
+    private var tempR: [Float32]
 
     init(capacity: Int) {
         self.capacity = capacity
-        L = [Float32](repeating: 0, count: capacity)
-        R = [Float32](repeating: 0, count: capacity)
+        L     = [Float32](repeating: 0, count: capacity)
+        R     = [Float32](repeating: 0, count: capacity)
+        tempL = [Float32](repeating: 0, count: capacity)
+        tempR = [Float32](repeating: 0, count: capacity)
     }
 
-    // MARK: Writer side
+    // MARK: Writer side (network task — non-real-time)
 
     /// Convert s16le interleaved stereo payload and append to ring buffer.
-    /// On overflow, flushes oldest frames to keep audio current (low latency).
+    ///
+    /// Conversion is performed outside the lock to minimise lock hold time.
+    /// When the payload exceeds available capacity, the OLDEST frames are
+    /// flushed to keep audio current (low latency). When the payload itself
+    /// exceeds the ring capacity, only the LATEST (tail) frames are kept.
     func write(s16lePayload payload: Data) {
-        let frameCount = payload.count / 4  // 2 ch × 2 bytes
+        let frameCount = payload.count / 4   // 2 ch × 2 bytes
         guard frameCount > 0 else { return }
 
+        // Always keep the most recent audio: if payload > capacity, skip the
+        // leading (oldest) frames so we write the tail of the payload.
+        let toWrite   = min(frameCount, capacity)
+        let srcOffset = frameCount - toWrite
+
+        // Step 1: s16le → Float32 conversion outside the lock.
         payload.withUnsafeBytes { raw in
             guard let base = raw.baseAddress else { return }
             let s16 = base.assumingMemoryBound(to: Int16.self)
-
-            os_unfair_lock_lock(&lock)
-            // If incoming frames would overflow, flush oldest to keep buffer current.
-            // Clamp excess to count so count never goes negative (e.g. oversized payload).
-            if count + frameCount > capacity {
-                let excess = min(count + frameCount - capacity, count)
-                readIdx = (readIdx + excess) % capacity
-                count  -= excess
-            }
-            let toWrite = min(frameCount, capacity)
             for i in 0..<toWrite {
-                let pos = (writeIdx + i) % capacity
-                L[pos] = Float(s16[i &* 2])      / 32_767.0
-                R[pos] = Float(s16[i &* 2 &+ 1]) / 32_767.0
+                tempL[i] = Float(s16[(srcOffset + i) &* 2])      / 32_767.0
+                tempR[i] = Float(s16[(srcOffset + i) &* 2 &+ 1]) / 32_767.0
             }
-            writeIdx = (writeIdx + toWrite) % capacity
-            count   += toWrite
-            os_unfair_lock_unlock(&lock)
         }
+
+        // Step 2: Copy converted floats into the ring buffer under the lock.
+        // Flush oldest frames first if the incoming batch would overflow.
+        os_unfair_lock_lock(&lock)
+        if count + toWrite > capacity {
+            let excess = min(count + toWrite - capacity, count)
+            readIdx = (readIdx + excess) % capacity
+            count  -= excess
+        }
+        for i in 0..<toWrite {
+            let pos = (writeIdx + i) % capacity
+            L[pos] = tempL[i]
+            R[pos] = tempR[i]
+        }
+        writeIdx = (writeIdx + toWrite) % capacity
+        count   += toWrite
+        os_unfair_lock_unlock(&lock)
     }
 
     // MARK: Reader side (render callback — real-time thread)
 
     /// Fill an AudioBufferList with `frameCount` Float32 non-interleaved frames.
-    /// Underrun positions are filled with silence.
+    ///
+    /// Uses trylock to avoid ever blocking the real-time audio thread. If the
+    /// write side holds the lock, this render period outputs silence; data will
+    /// be available next callback (~10 ms later once the writer finishes its µs work).
     func read(into abl: UnsafeMutablePointer<AudioBufferList>, frameCount: Int) {
         let abp = UnsafeMutableAudioBufferListPointer(abl)
         guard abp.count >= 2,
@@ -86,7 +123,13 @@ private final class AudioRingBuffer: @unchecked Sendable {
               let rOut = abp[1].mData?.assumingMemoryBound(to: Float32.self)
         else { return }
 
-        os_unfair_lock_lock(&lock)
+        // trylock: if the write side holds the lock, output silence and return
+        // immediately — never block the real-time thread (priority inversion).
+        guard os_unfair_lock_trylock(&lock) else {
+            for i in 0..<frameCount { lOut[i] = 0; rOut[i] = 0 }
+            return
+        }
+
         let toRead = min(frameCount, count)
         for i in 0..<toRead {
             let pos = (readIdx + i) % capacity
@@ -104,15 +147,13 @@ private final class AudioRingBuffer: @unchecked Sendable {
         }
     }
 
-    // MARK: Reset
+    // MARK: Reset (call only before reader/writer tasks start)
 
     func reset() {
-        os_unfair_lock_lock(&lock)
         writeIdx = 0
         readIdx  = 0
         count    = 0
         for i in 0..<capacity { L[i] = 0; R[i] = 0 }
-        os_unfair_lock_unlock(&lock)
     }
 }
 
@@ -124,8 +165,10 @@ final class ScrcpyAudioStream {
     var onDisconnect: (() -> Void)?
 
     private var readTask:    Task<Void, Never>?
-    private var engine:     AVAudioEngine = AVAudioEngine()
-    private var sourceNode: AVAudioSourceNode?
+    private var engine:      AVAudioEngine = AVAudioEngine()
+    private var sourceNode:  AVAudioSourceNode?
+    // Token for the AVAudioEngineConfigurationChange observer — removed in stop().
+    private var engineConfigObserver: (any NSObjectProtocol)?
 
     // scrcpy AudioConfig.java: 48 000 Hz, stereo, PCM_16BIT.
     private static let format = AVAudioFormat(
@@ -151,6 +194,13 @@ final class ScrcpyAudioStream {
         readTask     = nil
         onDisconnect = nil
 
+        // Remove the configuration-change observer before stopping the engine
+        // so the handler doesn't try to restart an intentionally stopped engine.
+        if let obs = engineConfigObserver {
+            NotificationCenter.default.removeObserver(obs)
+            engineConfigObserver = nil
+        }
+
         engine.stop()
         if let node = sourceNode {
             engine.detach(node)
@@ -166,7 +216,13 @@ final class ScrcpyAudioStream {
     // MARK: - Engine
 
     private func buildEngine() {
-        // Fresh engine each connection — avoids accumulated state from prior sessions
+        // Remove any stale observer before creating a new engine.
+        if let obs = engineConfigObserver {
+            NotificationCenter.default.removeObserver(obs)
+            engineConfigObserver = nil
+        }
+
+        // Fresh engine each connection — avoids accumulated state from prior sessions.
         let eng     = AVAudioEngine()
         engine      = eng
         let fmt     = Self.format
@@ -180,6 +236,27 @@ final class ScrcpyAudioStream {
         sourceNode = node
         eng.attach(node)
         eng.connect(node, to: eng.mainMixerNode, format: fmt)
+
+        // Restart the engine when audio hardware configuration changes.
+        // Without this handler, connecting/disconnecting headphones, switching
+        // Bluetooth audio devices, or changing the system default output causes
+        // AVAudioEngine to stop permanently — audio is dead until reconnect.
+        engineConfigObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: eng,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, self.engine === eng else { return }
+                do {
+                    try self.engine.start()
+                    log("Audio engine restarted after configuration change", level: .ok)
+                } catch {
+                    log("Audio engine restart failed: \(error)", level: .error)
+                }
+            }
+        }
+
         do {
             try eng.start()
         } catch {

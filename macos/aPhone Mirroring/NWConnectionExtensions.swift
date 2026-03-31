@@ -31,18 +31,29 @@ extension NWConnection {
     }
 
     private func receiveSome(minimum: Int, maximum: Int) async throws -> Data {
-        return try await withCheckedThrowingContinuation { continuation in
-            receive(minimumIncompleteLength: minimum, maximumLength: maximum) { data, _, isComplete, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                } else if let data, !data.isEmpty {
-                    continuation.resume(returning: data)
-                } else if isComplete {
-                    continuation.resume(throwing: NWError.posix(.ECONNABORTED))
-                } else {
-                    continuation.resume(returning: Data())
+        // Loop to handle the rare spurious NWConnection callback where data is nil,
+        // isComplete is false, and error is nil — re-arm the receive rather than
+        // returning empty Data, which would cause receiveExactly to spin.
+        while true {
+            let result: Data? = try await withCheckedThrowingContinuation { continuation in
+                receive(minimumIncompleteLength: minimum, maximumLength: maximum) { data, _, isComplete, error in
+                    if let error {
+                        continuation.resume(throwing: error)
+                    } else if let data, !data.isEmpty {
+                        continuation.resume(returning: data)
+                    } else if isComplete {
+                        continuation.resume(throwing: NWError.posix(.ECONNABORTED))
+                    } else {
+                        // Spurious callback: no data, no error, not complete.
+                        // Signal the loop to re-arm by returning nil.
+                        continuation.resume(returning: nil)
+                    }
                 }
             }
+            if let data = result {
+                return data
+            }
+            // nil means spurious wakeup — loop and re-arm the receive.
         }
     }
 }
