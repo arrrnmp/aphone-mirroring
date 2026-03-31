@@ -22,6 +22,7 @@ Built on the [scrcpy](https://github.com/Genymobile/scrcpy) protocol (v3.3.4) fo
 - Android 10 (API 29) or later
 - USB debugging enabled on the Android device
 - `adb` installed (`brew install android-platform-tools`)
+- `scrcpy` installed (`brew install scrcpy`) — the app uses the `scrcpy-server` binary from your Homebrew installation
 
 ### Build & run
 

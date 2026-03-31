@@ -36,32 +36,92 @@ xcodebuild -scheme "Scrcpy SwiftUI" -configuration Release build
 
 ### Architecture
 
-All source files are in `macos/aPhone Mirroring/`.
+All source files are in `macos/aPhone Mirroring/`, organized into subfolders:
+
+```
+macos/aPhone Mirroring/
+├── ContentView.swift                     (~70 lines: root split-panel + NSNotification extension)
+├── Scrcpy_SwiftUIApp.swift
+│
+├── Scrcpy/
+│   ├── ScrcpyManager.swift               (main orchestrator)
+│   ├── ScrcpyVideoStream.swift
+│   ├── ScrcpyAudioStream.swift
+│   ├── ScrcpyControlSocket.swift
+│   └── Extensions/
+│       ├── ScrcpyManager+Battery.swift
+│       ├── ScrcpyManager+Screenshot.swift
+│       └── ScrcpyManager+FilePush.swift
+│
+├── Bridge/
+│   ├── DataBridgeClient.swift
+│   ├── DataBridgeModels.swift
+│   └── BluetoothPairingManager.swift
+│
+├── Phone/
+│   ├── PhonePanelView.swift
+│   ├── PopoutView.swift
+│   ├── PopoutCoordinator.swift
+│   ├── HardwareControlsBar.swift
+│   ├── ScreenshotFlashView.swift
+│   ├── WindowChromeViews.swift
+│   ├── VideoDisplayView.swift
+│   ├── ControlPanelView.swift
+│   └── CallWindowController.swift
+│
+├── Tabs/
+│   ├── ContentPanelView.swift
+│   ├── Messages/
+│   │   ├── MessagesTabView.swift
+│   │   ├── ThreadListPanel.swift
+│   │   ├── ConversationPanel.swift
+│   │   └── NewConversationPanel.swift
+│   ├── Photos/
+│   │   └── PhotosTabView.swift
+│   ├── Calls/
+│   │   ├── CallsTabView.swift
+│   │   ├── CallListPanel.swift
+│   │   └── ContactDetailPanel.swift
+│   └── Contacts/
+│       ├── ContactsTabView.swift
+│       ├── ContactListPanel.swift
+│       └── ContactInfoPanel.swift
+│
+└── Shared/
+    ├── AppLog.swift
+    ├── AuthManager.swift
+    ├── ToolbarButton.swift
+    ├── NWConnectionExtensions.swift
+    ├── AppActionsMenu.swift
+    ├── LogPanel.swift
+    ├── PanelResizeDivider.swift
+    └── DevicePicker.swift
+```
 
 **Key components and their roles:**
 
 | File | Role |
 |------|------|
-| `ScrcpyManager.swift` | Main orchestrator (`@MainActor ObservableObject`). Owns connection lifecycle, ADB device discovery, TCP listener, handshake, battery polling, menu bar status icon, file drag-and-drop push, and screenshot capture. Publishes `screenshotFlash: ScreenshotFlash?` (set with `withAnimation`; auto-cleared after 3.5 s). |
-| `ScrcpyVideoStream.swift` | H.264 decoder. Reads 12-byte frame headers, converts Annex B → AVCC, enqueues `CMSampleBuffer` to `AVSampleBufferDisplayLayer`. Publishes `videoSize` (updated from SPS on every config packet, including rotation). Maintains a persistent `VTDecompressionSession` that decodes every frame in the background and stores the latest `CVPixelBuffer` for screenshot capture. |
-| `ScrcpyAudioStream.swift` | PCM audio processor. Reads raw s16le stereo 48 kHz frames, converts to Float32 planar, feeds an `AVAudioSourceNode` pull-model render callback via a lock-protected SPSC ring buffer (`AudioRingBuffer`). Real-time safe: render callback uses `os_unfair_lock_trylock` (never blocks); s16le→Float32 conversion happens outside the lock into pre-allocated scratch buffers to minimise lock hold time. Observes `AVAudioEngineConfigurationChange` to restart the engine when the audio device changes (headphones, Bluetooth, etc.). |
-| `ScrcpyControlSocket.swift` | Input protocol. Encodes keyboard/mouse/touch/scroll/rotation as scrcpy v3 binary messages (big-endian). Bidirectional clipboard sync. |
-| `ContentView.swift` | Root split-panel layout (`PhonePanelView` left + `ContentPanelView` right). `PhonePanelView` owns phone viewport, hover-reveal title bar, glass control pills, log panel, screenshot flash overlay, and the pop-out flow. `ContentPanelView` hosts a top-mounted Liquid Glass segmented tab bar (Messages / Photos / Calls) with `AuthManager`-gated content. Also contains `PopoutCoordinator`, `PopoutView`, `ToolbarHoverArea`, `TrafficLightController`, `ScreenshotFlashView`, `PanelResizeDivider`, `HardwareControlsBar`, and all tab sub-views. |
-| `ToolbarButton.swift` | Shared button component with two styles: `.glass` (36×36, interactive glass circle, used in title bar and hover toolbars) and `.panel` (36×36, plain, used in `ControlPanelView`). Replaces the duplicated `barButton`/`popBtn`/`panelButton` private helpers that previously existed in each view. |
-| `AuthManager.swift` | `@Observable` class that gates access to the right-panel tabs via biometrics/password. Locks after 2 min background or 2 min inactivity. |
-| `VideoDisplayView.swift` | `NSViewRepresentable` bridging SwiftUI to `AVSampleBufferDisplayLayer`. Captures all mouse/keyboard/scroll events, supports trackpad gesture simulation, and drag-and-drop file handling. |
-| `ControlPanelView.swift` | Floating side panel with hardware control buttons (Back, Home, Recents, Volume Up/Down, Mute, Power, Rotate). Exposes `onInteraction` callback used by `PopoutCoordinator` to reset idle-fade timer. |
+| `Scrcpy/ScrcpyManager.swift` | Main orchestrator (`@MainActor @Observable`). Owns connection lifecycle, ADB device discovery, TCP listener, and handshake. Battery polling, screenshot capture, and file-push are in separate extension files (`Extensions/`). Publishes `screenshotFlash: ScreenshotFlash?` (set with `withAnimation`; auto-cleared after 3.5 s). |
+| `Scrcpy/ScrcpyVideoStream.swift` | H.264 decoder. Reads 12-byte frame headers, converts Annex B → AVCC, enqueues `CMSampleBuffer` to `AVSampleBufferDisplayLayer`. Publishes `videoSize` (updated from SPS on every config packet, including rotation). Maintains a persistent `VTDecompressionSession` that decodes every frame in the background and stores the latest `CVPixelBuffer` for screenshot capture. |
+| `Scrcpy/ScrcpyAudioStream.swift` | PCM audio processor. Reads raw s16le stereo 48 kHz frames, converts to Float32 planar, feeds an `AVAudioSourceNode` pull-model render callback via a lock-protected SPSC ring buffer (`AudioRingBuffer`). Real-time safe: render callback uses `os_unfair_lock_trylock` (never blocks); s16le→Float32 conversion happens outside the lock into pre-allocated scratch buffers to minimise lock hold time. Observes `AVAudioEngineConfigurationChange` to restart the engine when the audio device changes (headphones, Bluetooth, etc.). |
+| `Scrcpy/ScrcpyControlSocket.swift` | Input protocol. Encodes keyboard/mouse/touch/scroll/rotation as scrcpy v3 binary messages (big-endian). Bidirectional clipboard sync. |
+| `ContentView.swift` | Root split-panel layout (~70 lines). Renders `PhonePanelView` (left) + `ContentPanelView` (right). Contains the `NSNotification.Name.navigateToSMS` extension. All subviews live in `Phone/` and `Tabs/`. |
+| `Shared/ToolbarButton.swift` | Shared button component with two styles: `.glass` (36×36, interactive glass circle, used in title bar and hover toolbars) and `.panel` (36×36, plain, used in `ControlPanelView`). Replaces the duplicated `barButton`/`popBtn`/`panelButton` private helpers that previously existed in each view. |
+| `Shared/AuthManager.swift` | `@Observable` class that gates access to the right-panel tabs via biometrics/password. Locks after 2 min background or 2 min inactivity. |
+| `Phone/VideoDisplayView.swift` | `NSViewRepresentable` bridging SwiftUI to `AVSampleBufferDisplayLayer`. Captures all mouse/keyboard/scroll events, supports trackpad gesture simulation, and drag-and-drop file handling. |
+| `Phone/ControlPanelView.swift` | Floating side panel with hardware control buttons (Back, Home, Recents, Volume Up/Down, Mute, Power, Rotate). Exposes `onInteraction` callback used by `PopoutCoordinator` to reset idle-fade timer. |
 | `Scrcpy_SwiftUIApp.swift` | App entry point + `WindowManager` (`@Observable`) for window chrome (transparent title bar, traffic lights, always-on-top). Simplified — no aspect-ratio locking in the main window (that lives in the popout). |
-| `AppLog.swift` | Singleton logger, max 500 entries, displayed as overlay in `PhonePanelView`. |
-| `NWConnectionExtensions.swift` | Protocol helpers: async `receiveExactly()` on `NWConnection`, big-endian `Data` readers. |
-| `DataBridgeClient.swift` | TCP client connecting to the Android `DataBridgeService` companion app on port 27184 (forwarded via `adb forward`). Fetches real SMS threads, messages, call log, photos, and contacts. Delivers Android push notifications to macOS Notification Center with actionable reply support. Handles `activeCall` state and `callAudioError`. Auto-retries with exponential backoff on disconnect. |
-| `DataBridgeModels.swift` | Swift models mirroring the Android bridge models: `BridgeThread`, `BridgeMessage`, `BridgeCall`, `BridgePhoto`, `BridgeContact`, `BridgeContactApp`, `BridgeCallState`, `BridgeRelativeDate`. All `Codable` for JSON decode over the TCP bridge. `DateFormatter` instances in `BridgeMessage.timeLabel` and `BridgeRelativeDate.label` are cached as `static let` locals — do not recreate them per call. |
-| `BluetoothPairingManager.swift` | Detects whether the Android device is paired via Classic Bluetooth (required for HFP call-audio routing). Reads the phone's BT address via ADB, then queries `system_profiler SPBluetoothDataType -json` to check if that address appears in macOS's paired-device list. Pairing is initiated by making the phone discoverable via ADB and opening macOS Bluetooth System Settings (`x-apple.systempreferences:com.apple.BluetoothSettings`) for the user to complete. Polls `system_profiler` every 2 s (60 s timeout). **Does not use `IOBluetooth`** — that framework is removed on macOS 26. |
-| `CallWindowController.swift` | Singleton that manages a floating borderless `NSWindow` shown during active calls. Hosts `CallView` — a Liquid Glass card with contact name, call status, elapsed timer, and glass circle action buttons (Mute, End, Mac Audio, Phone Audio). Positioned top-right of the main screen with a 12 pt margin. |
+| `Shared/AppLog.swift` | Singleton logger, max 500 entries, displayed as overlay in `PhonePanelView`. |
+| `Shared/NWConnectionExtensions.swift` | Protocol helpers: async `receiveExactly()` on `NWConnection`, big-endian `Data` readers. |
+| `Bridge/DataBridgeClient.swift` | TCP client connecting to the Android `DataBridgeService` companion app on port 27184 (forwarded via `adb forward`). Fetches real SMS threads, messages, call log, photos, and contacts. Delivers Android push notifications to macOS Notification Center with actionable reply support. Handles `activeCall` state and `callAudioError`. Auto-retries with exponential backoff on disconnect. |
+| `Bridge/DataBridgeModels.swift` | Swift models mirroring the Android bridge models: `BridgeThread`, `BridgeMessage`, `BridgeCall`, `BridgePhoto`, `BridgeContact`, `BridgeContactApp`, `BridgeCallState`, `BridgeRelativeDate`. All `Codable` for JSON decode over the TCP bridge. `DateFormatter` instances in `BridgeMessage.timeLabel` and `BridgeRelativeDate.label` are cached as `static let` locals — do not recreate them per call. |
+| `Bridge/BluetoothPairingManager.swift` | Detects whether the Android device is paired via Classic Bluetooth (required for HFP call-audio routing). Reads the phone's BT address via ADB, then queries `system_profiler SPBluetoothDataType -json` to check if that address appears in macOS's paired-device list. Pairing is initiated by making the phone discoverable via ADB and opening macOS Bluetooth System Settings (`x-apple.systempreferences:com.apple.BluetoothSettings`) for the user to complete. Polls `system_profiler` every 2 s (60 s timeout). **Does not use `IOBluetooth`** — that framework is removed on macOS 26. |
+| `Phone/CallWindowController.swift` | Singleton that manages a floating borderless `NSWindow` shown during active calls. Hosts `CallView` — a Liquid Glass card with contact name, call status, elapsed timer, and glass circle action buttons (Mute, End, Mac Audio, Phone Audio). Positioned top-right of the main screen with a 12 pt margin. |
 
 **Connection flow** (in `ScrcpyManager.performConnect`):
 1. Verify ADB (`adb version`)
-2. Locate `scrcpy-server.jar` in app bundle
+2. Locate `scrcpy-server` from Homebrew (`/opt/homebrew/share/scrcpy/scrcpy-server`, `/usr/local/share/scrcpy/scrcpy-server`, or `~/.local/share/scrcpy/scrcpy-server`). Fails with an actionable error if not found — run `brew install scrcpy`.
 3. Push JAR to device at `/data/local/tmp/scrcpy-server.jar`
 4. Generate random SCID (1...0x7FFFFFFF)
 5. Detect device refresh rate via `dumpsys display` (fallback: 60 Hz)
@@ -94,7 +154,7 @@ All source files are in `macos/aPhone Mirroring/`.
 - `0x0B` ROTATE_DEVICE: 1 byte (type only)
 
 **State management:**
-- `ScrcpyManager` uses `ObservableObject` + `@Published`; `WindowManager` uses `@Observable` (Swift 5.10 macro)
+- `ScrcpyManager` uses `@MainActor @Observable` (Swift 6 macro); `WindowManager` also uses `@Observable`
 - Video, audio, and control objects use `@MainActor` for thread safety
 - Video/audio reading uses `Task.detached` to avoid blocking `@MainActor` during network I/O
 - Frames use `kCMSampleAttachmentKey_DisplayImmediately` to bypass PTS scheduling
@@ -139,7 +199,7 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - `collectionBehavior = [.managed, .fullScreenNone]` — fullscreen disabled
 - No aspect-ratio locking in the main window; the split-panel layout drives its own sizing
 
-**Split layout** (in `ContentView.swift`):
+**Split layout** (in `ContentView.swift`, panels in `Phone/PhonePanelView.swift` and `Tabs/ContentPanelView.swift`):
 - Left panel (`PhonePanelView`): fixed width 300–420pt, `.thinMaterial` background, phone viewport
 - Right panel (`ContentPanelView`): flexible, dark grey `Color(white: 0.12)` background, floating tab bar + auth
 - No explicit divider between panels — the contrasting backgrounds provide visual separation
@@ -165,7 +225,7 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - `TrafficLightController` NSViewRepresentable syncs traffic-light alphaValue with `toolbarVisible`
 - Button order matches main panel: Retreat → Logs → Pin → Audio → Screenshot → Disconnect
 
-**Right panel tab bar** (in `ContentPanelView`):
+**Right panel tab bar** (in `Tabs/ContentPanelView.swift`):
 - Layout is `VStack`: tab bar at top, content fills remaining height. No bottom floating bar.
 - Tab bar: a single `.glassEffect(.regular, in: Capsule())` on the outer `HStack` — one glass surface for the whole bar, not per-item glass pills.
 - Selection indicator: a `Capsule().fill(Color.white.opacity(0.15))` behind the selected item, animated via `matchedGeometryEffect(id: "tab-selection", in: tabNS)` — slides smoothly between tabs with `.smooth(duration: 0.28)`.
@@ -173,13 +233,13 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - `PhoneTab` enum only has `title: String`.
 - Auth gating: `LockedView` overlays the full content area when locked; tab content is not rendered while locked. Tab taps while locked trigger `auth.authenticate()`.
 
-**Liquid Glass rules enforced throughout `ContentView.swift`:**
+**Liquid Glass rules enforced throughout the view layer:**
 - **Content panels are never glass.** Per Apple HIG: "Don't use Liquid Glass in the content layer." Content panels (thread lists, conversation views, photo grids, call lists, contact detail) use plain `Color(white: 0.17)` elevated fills clipped to `RoundedRectangle(cornerRadius: 16)`.
 - **Glass is reserved for interactive controls only**: tab bar, toolbar buttons, control pills, action buttons, and inline segmented controls.
 - `.prominent` glass style is **not available on macOS** — only `.regular` is supported.
 - Multiple adjacent glass elements must be wrapped in `GlassEffectContainer` so their surfaces share a sampling region. Do not use `GlassEffectContainer` around non-glass content.
 
-**`PanelResizeDivider`** (shared component, private in `ContentView.swift`):
+**`PanelResizeDivider`** (in `Shared/PanelResizeDivider.swift`):
 - A thin 1pt `Rectangle` with an 8pt invisible hit target; dragging changes the left panel's `@Binding var width`.
 - `startWidth` captured `onAppear` and `onEnded`; `onChanged` clamps to `[minWidth, maxWidth]`.
 - `onHover` pushes/pops `NSCursor.resizeLeftRight` for native cursor feedback.
@@ -189,7 +249,7 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - `@State private var sidebarWidth: CGFloat = 232` lives in `ContentPanelView` and is passed as `@Binding` to both `MessagesTabView` and `CallsTabView` — the sidebar width persists across tab switches.
 - Each tab view uses `.onGeometryChange(for: CGFloat.self, of: \.size.width)` to clamp `sidebarWidth` when the window shrinks, ensuring the right panel always has at least 220 pt.
 
-**Messages tab** (in `ContentView.swift`):
+**Messages tab** (in `Tabs/Messages/`):
 - Two-panel split: left = `ThreadListPanel` (thread list + search + compose button), right = `ConversationPanel` (contact header + message history + input bar).
 - Both panels use `Color(white: 0.17)` fill + `clipShape(RoundedRectangle(cornerRadius: 16))` — no glass.
 - Sidebar width received as `@Binding var listWidth`, clamped 160–340 pt via `PanelResizeDivider`.
@@ -201,14 +261,14 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - Received message bubbles: `.white.opacity(0.12)` fill. Sent: `Color.blue` fill. Timestamp labels at 11pt.
 - Day grouping via `groupedByDay(_:)` + `DayDivider`. New-conversation flow via `NewConversationPanel`.
 
-**Photos tab** (in `ContentView.swift`):
+**Photos tab** (in `Tabs/Photos/PhotosTabView.swift`):
 - `LazyVGrid` with `[GridItem(.adaptive(minimum: 130, maximum: 240), spacing: 8)]` — fills available width, each cell 130–240 pt.
 - `ScrollView` uses `Color(white: 0.17)` fill + `clipShape(RoundedRectangle(cornerRadius: 16))` — no glass.
 - Loading state: `ProgressView` + "Loading photos…" label (no bare spinner).
 - Photo cells (`PhotoCell`): square `Rectangle` fill, thumbnail loaded via `bridge.fetchThumbnail(mediaId:)` on appear, `NSCursor.pointingHand` on hover. Clicking calls `bridge.openFullPhoto(mediaId:)`. Checkmark overlay when `photo.localURL != nil`.
 - Infinite scroll: sentinel `Color.clear` at grid end triggers `bridge.loadMorePhotos()` when it appears.
 
-**Calls tab** (in `ContentView.swift`):
+**Calls tab** (in `Tabs/Calls/`):
 - Same two-panel split as Messages; both panels use `Color(white: 0.17)` fill — no glass on content panels.
 - Left panel (`CallListPanel`): search bar + scrollable `CallRow` list. Each row shows avatar, name (red if missed), direction icon + duration, time. Selection uses `Color.accentColor.opacity(0.15)`. Data from `bridge.calls`.
 - Sidebar width received as `@Binding var listWidth` from `ContentPanelView` (shared with Messages/Contacts tabs).
@@ -219,7 +279,7 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
   - **Liquid Glass segmented control** (Details / Recent Calls): two glass pills inside `GlassEffectContainer(spacing: 2)` with `glassEffectID` morphing via `@Namespace var detailNS`. Switches tab content with `.smooth(duration: 0.25)`.
   - Section content (Details rows, Recent Calls rows) in `Color(white: 0.20)` rounded cards — plain fills, no glass.
 
-**Contacts tab** (in `ContentView.swift`):
+**Contacts tab** (in `Tabs/Contacts/`):
 - Same two-panel split as Messages/Calls; both panels use `Color(white: 0.17)` fill — no glass on content panels.
 - Left panel (`ContactListPanel`): search bar + scrollable `ContactRow` list. Each row shows hue-tinted avatar, name, first phone number. Data from `bridge.contacts`. Sidebar width shared via `@Binding var listWidth`.
 - Right panel (`ContactInfoPanel`): identical layout to `ContactDetailPanel` in the Calls tab.
@@ -230,7 +290,7 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
   - Phone numbers deduplicated by digits-only comparison before rendering.
   - Email rows are tappable — open `mailto:` URL in default Mail app.
 
-**`HardwareControlsBar`** (private struct in `ContentView.swift`):
+**`HardwareControlsBar`** (in `Phone/HardwareControlsBar.swift`):
 - Shared hardware control bar used by both `PhonePanelView`'s inline controls section and `PopoutView`'s fullscreen bottom bar.
 - Takes a single `controlSocket: ScrcpyControlSocket` parameter. Renders three glass-pill groups: Volume (Up/Down/Mute), Navigation (Back/Home/Recents), System (Power/Rotate).
 - Do not duplicate this inline — use `HardwareControlsBar(controlSocket:)` at both call sites.
@@ -261,7 +321,7 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 - `ScrcpyVideoStream.processConfigPacket` extracts dimensions from `CMVideoFormatDescription` and updates `videoSize`
 - `ContentView.onChange(of: manager.videoStream.videoSize)` calls `controlSocket.updateVideoSize` (for input coordinate mapping); the main split-panel window does NOT lock to the phone's aspect ratio — the phone video is letterboxed inside the fixed-width phone panel
 - When popped out: `PhonePanelView.onChange(of: manager.videoStream.videoSize)` detects orientation flip (portrait↔landscape) and animates the pop-out window to a new size (current phone height becomes new phone width, keeping scale constant), then updates `contentAspectRatio`
-- `PopoutView` observes `manager.videoStream.videoSize` (via `@ObservedObject var manager`) so the in-window `fitSize` computation updates live on every `videoSize` change
+- `PopoutView` observes `manager.videoStream.videoSize` so the in-window `fitSize` computation updates live on every `videoSize` change
 
 **Video display:**
 - `AVSampleBufferDisplayLayer.videoGravity = .resize` (not `.resizeAspect`) — no black bars because the window is always constrained to the phone's exact aspect ratio
@@ -280,14 +340,14 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 **Battery status** (in `ScrcpyManager`):
 - Polled every 60s from `dumpsys battery`, parsed for `level:` and `status:` (2=charging, 5=full)
 - Displayed as macOS menu bar status item with battery icon + level + ⚡ charging indicator
-- Change guard skips `@Published` assignments (and status bar rebuild) when level and charging state are unchanged — do not remove it
+- Change guard skips observable assignments (and status bar rebuild) when level and charging state are unchanged — do not remove it
 
 **Screenshot** (in `ScrcpyManager` + `ScrcpyVideoStream`):
 - Triggered via `camera` button in main panel title bar (when connected) or popout hover toolbar
 - `ScrcpyVideoStream` keeps a persistent `VTDecompressionSession` (`captureSession`) that decodes every incoming frame on a background VT thread and stores the result in `latestDecodedBuffer` via `DispatchQueue.main.async`. This avoids the deadlock that occurs when creating a VT session on `@MainActor` and blocking with `VTDecompressionSessionWaitForAsynchronousFrames` (the output handler can't be delivered while main is blocked).
 - `captureCurrentFrame()` converts `latestDecodedBuffer` (CVPixelBuffer → CIImage → CGImage) using a `lazy var ciContext` (Metal GPU context). Returns nil if no frame has been decoded yet. Do not create a new `CIContext` per call — it is extremely expensive.
 - `ScrcpyManager.takeScreenshot()`: captures frame, writes PNG to Desktop as `aPhone Screenshot yyyy-MM-dd at HH.mm.ss.png`, plays `/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif` (fallback: `NSSound(named: "Pop")`), sets `screenshotFlash` with `withAnimation`, clears it after 3.5 s.
-- `ScreenshotFlashView` (private in `ContentView.swift`): thumbnail overlay at `.bottomTrailing` of the phone viewport; springs in via `onAppear`; clicking opens the file in the default viewer (`NSWorkspace.shared.open`). Shown in both main panel (`!viewportIsPopped`) and popout.
+- `ScreenshotFlashView` (in `Phone/ScreenshotFlashView.swift`): thumbnail overlay at `.bottomTrailing` of the phone viewport; springs in via `onAppear`; clicking opens the file in the default viewer (`NSWorkspace.shared.open`). Shown in both main panel (`!viewportIsPopped`) and popout.
 - `CGWindowListCreateImage` is **unavailable** in the macOS 26 SDK — do not attempt to use it.
 
 **Audio** (in `ScrcpyAudioStream`):

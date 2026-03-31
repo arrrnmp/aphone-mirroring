@@ -43,6 +43,8 @@ Built on the [scrcpy](https://github.com/Genymobile/scrcpy) protocol (v3.3.4) fo
 - macOS 26.2 or later
 - Xcode 26+
 - Android device with USB debugging enabled
+- `adb` installed (`brew install android-platform-tools`)
+- `scrcpy` installed (`brew install scrcpy`) — provides `scrcpy-server` used for mirroring
 - [PhoneConnect](https://github.com/arrrnmp/phoneconnect) companion app installed on Android (for data bridge features)
 
 ---
@@ -51,6 +53,7 @@ Built on the [scrcpy](https://github.com/Genymobile/scrcpy) protocol (v3.3.4) fo
 
 ```bash
 brew install android-platform-tools
+brew install scrcpy
 ```
 
 Verify ADB can see your device:
@@ -63,12 +66,12 @@ adb devices
 
 ## Build & Run
 
-Open `aPhone Mirroring.xcodeproj` in Xcode, select your Mac as the run destination, and build.
+Open `macos/aPhone Mirroring.xcodeproj` in Xcode, select your Mac as the run destination, and build.
 
 Or via CLI:
 
 ```bash
-cd "aPhone Mirroring"
+cd macos
 xcodebuild -scheme "Scrcpy SwiftUI" -configuration Debug -destination 'platform=macOS' build
 ```
 
