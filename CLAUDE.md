@@ -31,7 +31,7 @@ xcodebuild -scheme "Scrcpy SwiftUI" -configuration Release build
 ```
 
 - **Deployment target**: macOS 26.2
-- **Swift version**: 5.0
+- **Swift version**: 6.0
 - No tests, no linting tools, no third-party dependencies — all system frameworks only.
 
 ### Architecture
