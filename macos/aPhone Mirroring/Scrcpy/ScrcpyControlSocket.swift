@@ -1,6 +1,6 @@
 //
 //  ScrcpyControlSocket.swift
-//  Scrcpy SwiftUI
+//  aPhone Mirroring
 //
 //  Sends input events to scrcpy-server over the control socket using
 //  the scrcpy v3 binary protocol (all integers big-endian).
@@ -20,16 +20,27 @@
 //    0x00  CLIPBOARD            5 + N bytes (len:4 + text:N)
 //    0x01  ACK_CLIPBOARD        9 bytes (seq:8)
 //
+//  ⚠️  GET_CLIPBOARD must be exactly 2 bytes (type + copy_key=0x00). Sending only
+//      1 byte causes protocol desync — the server blocks waiting for the second byte
+//      and then misinterprets all subsequent control messages.
+//
+//  Clipboard sync: bidirectional text-only (images are not supported by the protocol).
+//    Mac→Android: NSPasteboard.changeCount polled every 500 ms → sendSetClipboard.
+//    Android→Mac: device sends CLIPBOARD push + GET_CLIPBOARD fallback every 3 s.
+//
+//  Coordinate mapping: macOS uses bottom-left origin, Android uses top-left.
+//    Y is flipped: androidY = videoHeight - macosY. X/Y are also scaled by
+//    (videoWidth / viewWidth) and (videoHeight / viewHeight).
+//
 
 import Foundation
 import AppKit
 import Network
-import Combine
 
 // MARK: - ScrcpyControlSocket
 
 @MainActor
-final class ScrcpyControlSocket: ObservableObject {
+final class ScrcpyControlSocket {
 
     private var connection: NWConnection?
     // Must match the current video frame dimensions (server validates these)

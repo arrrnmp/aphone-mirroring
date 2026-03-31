@@ -1,12 +1,43 @@
 //
 //  ScrcpyManager.swift
-//  Scrcpy SwiftUI
+//  aPhone Mirroring
+//
+//  Central orchestrator for the scrcpy mirroring session.
+//
+//  Owns the full connection lifecycle:
+//    1. ADB device discovery (polled every 3 s via devicePollTask)
+//    2. Server JAR push, reverse tunnel setup, NWListener for 3 TCP sockets
+//    3. Handshake (64-byte device name + 12-byte codec metadata)
+//    4. Delegation to ScrcpyVideoStream, ScrcpyAudioStream, ScrcpyControlSocket
+//    5. Disconnect / error recovery via handleUnexpectedDisconnect()
+//
+//  Connection state machine:
+//
+//    .disconnected ──connect()──► .connecting
+//                                     │
+//                               ADB + TCP handshake
+//                                     │
+//                      success ───────┤──── failure ──► .error(msg)
+//                                     ▼
+//                               .connected
+//                                     │
+//             handleUnexpectedDisconnect() or disconnect()
+//                                     │
+//                              .disconnected
+//
+//  Battery polling and status bar live in ScrcpyManager+Battery.swift.
+//  File push (drag & drop) lives in ScrcpyManager+FilePush.swift.
+//  Screenshot capture lives in ScrcpyManager+Screenshot.swift.
+//
+//  Thread model: @MainActor throughout. Blocking ADB subprocess calls are
+//  bridged to async Swift via DispatchQueue.global + withCheckedContinuation
+//  in adb(). NWListener requires a DispatchQueue — that queue never touches
+//  Swift state directly; all state mutations hop to @MainActor via MainActor.run.
 //
 
 import Foundation
 import AppKit
 import SwiftUI
-import Combine
 import Network
 import ImageIO
 
@@ -30,23 +61,26 @@ struct ScreenshotFlash: Identifiable {
 // MARK: - ScrcpyManager
 
 @MainActor
-final class ScrcpyManager: ObservableObject {
+@Observable
+final class ScrcpyManager {
 
-    @Published var state: ScrcpyState = .disconnected
-    @Published var connectedDevice: String? = nil  // display name from handshake
-    @Published var availableDevices: [String] = []  // display strings "Model (serial)"
-    @Published var batteryLevel: Int? = nil
-    @Published var batteryCharging: Bool = false
-    @Published var screenshotFlash: ScreenshotFlash? = nil
-    @Published var audioEnabled: Bool = true {
+    var state: ScrcpyState = .disconnected
+    var connectedDevice: String? = nil  // display name from handshake
+    var availableDevices: [String] = []  // display strings "Model (serial)"
+    var batteryLevel: Int? = nil
+    var batteryCharging: Bool = false
+    var screenshotFlash: ScreenshotFlash? = nil
+    var audioEnabled: Bool = true {
         didSet { audioStream.setAudioEnabled(audioEnabled) }
     }
 
     // Serial of the currently connected device, used for disconnect detection
-    private var connectedSerial: String? = nil
+    // Internal (not private) so ScrcpyManager+Battery and +FilePush extensions can read it.
+    var connectedSerial: String? = nil
 
-    private var batteryPollTask: Task<Void, Never>?
-    private var statusItem: NSStatusItem?
+    // Internal so ScrcpyManager+Battery.swift can manage the poll task and status item.
+    var batteryPollTask: Task<Void, Never>?
+    var statusItem: NSStatusItem?
 
     let videoStream   = ScrcpyVideoStream()
     let audioStream   = ScrcpyAudioStream()
@@ -55,21 +89,38 @@ final class ScrcpyManager: ObservableObject {
     let dataBridge    = DataBridgeClient()
 
     private let adbPath: String = {
+        let home = NSHomeDirectory()
         let candidates = [
-            "/opt/homebrew/bin/adb",
-            "/usr/local/bin/adb",
-            "\(NSHomeDirectory())/Library/Android/sdk/platform-tools/adb",
-            "/Users/\(NSUserName())/Library/Android/sdk/platform-tools/adb"
+            "/opt/homebrew/bin/adb",                                    // Homebrew (Apple Silicon)
+            "/usr/local/bin/adb",                                       // Homebrew (Intel)
+            "\(home)/Library/Android/sdk/platform-tools/adb",          // Android Studio SDK
         ]
         return candidates.first { FileManager.default.fileExists(atPath: $0) }
-            ?? "/opt/homebrew/bin/adb"  // fallback, will fail with a clear error
+            ?? "/opt/homebrew/bin/adb"  // fallback — will fail with a clear error message
     }()
 
+    /// Locates the scrcpy-server JAR from the system scrcpy installation.
+    ///
+    /// Searches standard Homebrew locations. If not found, returns nil and the
+    /// connection will fail with a human-readable error directing the user to
+    /// `brew install scrcpy`.
+    ///
+    /// The JAR is NOT bundled in the app — it lives alongside the scrcpy binary
+    /// that the user has installed, which means it is always in sync with the
+    /// scrcpy version on the device.
     private var serverJarURL: URL? {
-        let url = Bundle.main.url(forResource: "scrcpy-server", withExtension: nil)
-        log("Server JAR lookup: \(url?.path ?? "NOT FOUND in bundle")",
-            level: url == nil ? .error : .debug)
-        return url
+        let home = NSHomeDirectory()
+        let candidates = [
+            "/opt/homebrew/share/scrcpy/scrcpy-server",   // Homebrew (Apple Silicon)
+            "/usr/local/share/scrcpy/scrcpy-server",       // Homebrew (Intel)
+            "\(home)/.local/share/scrcpy/scrcpy-server",  // manual / custom install
+        ]
+        if let path = candidates.first(where: { FileManager.default.fileExists(atPath: $0) }) {
+            log("scrcpy-server found: \(path)", level: .debug)
+            return URL(fileURLWithPath: path)
+        }
+        log("scrcpy-server not found — install scrcpy via `brew install scrcpy`", level: .error)
+        return nil
     }
 
     private var serverProcess: Process?
@@ -98,6 +149,8 @@ final class ScrcpyManager: ObservableObject {
         }
     }
 
+    /// Queries `adb devices -l`, updates `availableDevices`, and disconnects if the
+    /// currently connected device serial is no longer present.
     func refreshDevices() async {
         let raw = await adb(["devices", "-l"])
         log("adb devices output:\n\(raw.trimmingCharacters(in: .whitespacesAndNewlines))", level: .debug)
@@ -135,6 +188,12 @@ final class ScrcpyManager: ObservableObject {
 
     // MARK: - Connect
 
+    /// Initiates a full scrcpy session with the given device serial (or the first
+    /// available device if `nil`). No-op if not in `.disconnected` state.
+    ///
+    /// Steps: push server JAR → start NWListener → set up ADB reverse tunnel →
+    /// launch server process → perform 64-byte + 12-byte handshake → hand off
+    /// connections to VideoStream / AudioStream / ControlSocket.
     func connect(deviceSerial: String? = nil) async {
         guard state == .disconnected else {
             log("connect() called but state is \(state) — ignoring", level: .warn)
@@ -165,7 +224,7 @@ final class ScrcpyManager: ObservableObject {
         log("adb version: \(adbVersion.components(separatedBy: "\n").first ?? adbVersion)", level: .debug)
 
         // Step 2: Check server JAR
-        log("Step 2: Locating scrcpy-server JAR in bundle…")
+        log("Step 2: Locating scrcpy-server JAR…")
         guard let jarURL = serverJarURL else {
             throw ScrcpyError.serverJarMissing
         }
@@ -390,6 +449,11 @@ final class ScrcpyManager: ObservableObject {
 
     // MARK: - Disconnect
 
+    /// Tears down the active session: cancels all tasks, closes TCP connections,
+    /// removes the status bar item, and resets state to `.disconnected`.
+    /// Called on both intentional disconnects and error recovery.
+    /// Nulls `onDisconnect` on all sub-objects first so their callbacks never
+    /// fire during an intentional teardown.
     func disconnect() async {
         log("Disconnecting…")
         videoStream.onDisconnect   = nil
@@ -417,181 +481,6 @@ final class ScrcpyManager: ObservableObject {
         batteryCharging = false
         btManager.reset()
         log("Disconnected.", level: .ok)
-    }
-
-    // MARK: - File push (drag & drop)
-
-    func pushFiles(_ urls: [URL]) async {
-        guard let serial = connectedSerial else { return }
-        let serialArgs = ["-s", serial]
-
-        let apkURLs  = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() == "apk" }
-        let fileURLs = urls.filter { $0.isFileURL && $0.pathExtension.lowercased() != "apk" }
-
-        // ── APK installation ──────────────────────────────────────────────────
-        for url in apkURLs {
-            let filename = url.lastPathComponent
-            log("Installing \(filename)…")
-            // Copy to a temp path so iCloud/alias placeholders are resolved
-            let tmp = FileManager.default.temporaryDirectory
-                .appendingPathComponent(filename)
-            let accessed = url.startAccessingSecurityScopedResource()
-            do {
-                try? FileManager.default.removeItem(at: tmp)
-                try FileManager.default.copyItem(at: url, to: tmp)
-            } catch {
-                log("Could not read \(filename): \(error.localizedDescription)", level: .error)
-                if accessed { url.stopAccessingSecurityScopedResource() }
-                continue
-            }
-            if accessed { url.stopAccessingSecurityScopedResource() }
-            let result = await adb(serialArgs + ["install", "-r", tmp.path])
-            try? FileManager.default.removeItem(at: tmp)
-            if result.lowercased().contains("success") {
-                log("Installed \(filename) ✓", level: .ok)
-            } else {
-                log("Install failed for \(filename): \(result.trimmingCharacters(in: .whitespacesAndNewlines))", level: .error)
-            }
-        }
-
-        guard !fileURLs.isEmpty else { return }
-
-        // ── Regular file push ─────────────────────────────────────────────────
-        log("Pushing \(fileURLs.count) file(s) to /sdcard/Download/")
-
-        // Copy each file to a temp dir so that:
-        //   • Cloud/iCloud placeholders are fully materialised before adb reads them
-        //   • Lazy-loaded drag assets (Photos.app, etc.) are resolved to real data
-        //   • adb subprocess gets a simple, stable path without any alias indirection
-        let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("scrcpy-push-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
-
-        struct PushItem { let src: URL; let filename: String }
-        var items: [PushItem] = []
-
-        for url in fileURLs {
-            let filename = url.lastPathComponent
-            let dst = tmp.appendingPathComponent(filename)
-            let accessed = url.startAccessingSecurityScopedResource()
-            do {
-                try FileManager.default.copyItem(at: url, to: dst)
-                items.append(PushItem(src: dst, filename: filename))
-            } catch {
-                log("Could not read \(filename): \(error.localizedDescription)", level: .error)
-            }
-            if accessed { url.stopAccessingSecurityScopedResource() }
-        }
-
-        var pushedFilenames: [String] = []
-        for item in items {
-            log("Pushing \(item.filename)…")
-            let result = await adb(serialArgs + ["push", item.src.path, "/sdcard/Download/\(item.filename)"])
-            try? FileManager.default.removeItem(at: item.src)
-            if result.lowercased().contains("error") || result.lowercased().contains("failed") {
-                log("Push failed for \(item.filename): \(result.trimmingCharacters(in: .whitespacesAndNewlines))", level: .error)
-            } else {
-                log("Pushed \(item.filename) ✓", level: .ok)
-                pushedFilenames.append(item.filename)
-            }
-        }
-        try? FileManager.default.removeItem(at: tmp)
-
-        // Notify media scanner for each pushed file
-        for filename in pushedFilenames {
-            await adb(serialArgs + [
-                "shell", "am", "broadcast",
-                "-a", "android.intent.action.MEDIA_SCANNER_SCAN_FILE",
-                "-d", "file:///sdcard/Download/\(filename)"
-            ])
-        }
-
-        // Open Downloads folder on device
-        if !pushedFilenames.isEmpty {
-            await adb(serialArgs + [
-                "shell", "am", "start",
-                "-a", "android.intent.action.VIEW",
-                "-d", "content://com.android.externalstorage.documents/document/primary%3ADownload",
-                "-t", "vnd.android.document/directory"
-            ])
-            log("Opened Downloads folder on device", level: .debug)
-        }
-    }
-
-    // MARK: - Battery
-
-    private func startBatteryPolling() {
-        batteryPollTask?.cancel()
-        batteryPollTask = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.refreshBattery()
-                try? await Task.sleep(for: .seconds(60))
-            }
-        }
-    }
-
-    private func refreshBattery() async {
-        guard let serial = connectedSerial else { return }
-        let output = await adb(["-s", serial, "shell", "dumpsys", "battery"])
-        guard let (level, charging) = parseBattery(output) else { return }
-        guard batteryLevel != level || batteryCharging != charging else { return }
-        batteryLevel = level
-        batteryCharging = charging
-        updateStatusBar(level: level, charging: charging)
-        log("Battery: \(level)%\(charging ? " ⚡" : "")", level: .debug)
-    }
-
-    private func parseBattery(_ output: String) -> (level: Int, charging: Bool)? {
-        var level: Int? = nil
-        var status = 0
-        for line in output.components(separatedBy: "\n") {
-            let t = line.trimmingCharacters(in: .whitespaces)
-            if t.hasPrefix("level:"), let v = Int(t.dropFirst(6).trimmingCharacters(in: .whitespaces)) {
-                level = v
-            } else if t.hasPrefix("status:"), let v = Int(t.dropFirst(7).trimmingCharacters(in: .whitespaces)) {
-                status = v
-            }
-        }
-        guard let level else { return nil }
-        // status 2 = CHARGING, 5 = FULL (on charger)
-        return (level, status == 2 || status == 5)
-    }
-
-    // MARK: - Status bar
-
-    private func setupStatusBar() {
-        removeStatusBar()
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        guard let button = statusItem?.button else { return }
-        button.image = NSImage(systemSymbolName: "smartphone", accessibilityDescription: "Android Device")
-        button.image?.isTemplate = true
-        button.toolTip = "Android battery"
-    }
-
-    private func updateStatusBar(level: Int, charging: Bool) {
-        guard let button = statusItem?.button else { return }
-        let symbol = batteryLevelSymbol(level)
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: "Battery \(level)%")
-        button.image?.isTemplate = true
-        button.title = " \(charging ? "⚡" : "")\(level)%"
-        button.toolTip = "Android battery: \(level)%\(charging ? " (charging)" : "")"
-    }
-
-    private func removeStatusBar() {
-        if let item = statusItem {
-            NSStatusBar.system.removeStatusItem(item)
-            statusItem = nil
-        }
-    }
-
-    private func batteryLevelSymbol(_ level: Int) -> String {
-        switch level {
-        case 0..<13:  return "battery.0percent"
-        case 13..<38: return "battery.25percent"
-        case 38..<63: return "battery.50percent"
-        case 63..<88: return "battery.75percent"
-        default:      return "battery.100percent"
-        }
     }
 
     // MARK: - Refresh rate detection
@@ -672,52 +561,6 @@ final class ScrcpyManager: ObservableObject {
         }
     }
 
-    // MARK: - Screenshot
-
-    /// Captures the currently displayed video frame and saves it to the Desktop as a PNG.
-    /// Plays a click sound, shows a thumbnail overlay, and auto-dismisses after 3.5 s.
-    /// No command is sent to the device.
-    func takeScreenshot() {
-        // Prefer capturing from the GPU compositor (works for video layers).
-        // Fall back to VT re-decode if no VideoNSView is reachable.
-        guard let image = videoStream.captureCurrentFrame() else {
-            log("Screenshot: no decoded frame available yet", level: .warn)
-            return
-        }
-
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
-        let filename = "aPhone Screenshot \(formatter.string(from: Date())).png"
-        let desktop  = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
-        let fileURL  = desktop.appendingPathComponent(filename)
-
-        guard let dest = CGImageDestinationCreateWithURL(fileURL as CFURL, "public.png" as CFString, 1, nil) else {
-            log("Screenshot: could not create destination at \(fileURL.path)", level: .error)
-            return
-        }
-        CGImageDestinationAddImage(dest, image, nil)
-        guard CGImageDestinationFinalize(dest) else {
-            log("Screenshot: failed to write PNG", level: .error)
-            return
-        }
-
-        log("Screenshot saved: \(filename)", level: .ok)
-        let shutterPath = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif"
-        (NSSound(contentsOfFile: shutterPath, byReference: true) ?? NSSound(named: "Pop"))?.play()
-
-        let flash = ScreenshotFlash(image: image, url: fileURL)
-        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
-            screenshotFlash = flash
-        }
-        Task {
-            try? await Task.sleep(for: .seconds(3.5))
-            if screenshotFlash?.id == flash.id {
-                withAnimation(.easeOut(duration: 0.25)) { screenshotFlash = nil }
-            }
-        }
-    }
-
-
     private func extractSerial(from raw: String?) -> String? {
         guard let raw else { return nil }
         if raw.contains("("), let start = raw.lastIndex(of: "("), let end = raw.lastIndex(of: ")") {
@@ -740,7 +583,7 @@ enum ScrcpyError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .serverJarMissing:
-            return "scrcpy-server not found in app bundle."
+            return "scrcpy-server not found. Run: brew install scrcpy"
         case .pushFailed(let msg):
             return "Failed to push server to device: \(msg)"
         case .reverseTunnelFailed(let msg):

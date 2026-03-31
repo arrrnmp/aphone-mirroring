@@ -1,6 +1,24 @@
 //
 //  ScrcpyVideoStream.swift
-//  Scrcpy SwiftUI
+//  aPhone Mirroring
+//
+//  Reads H.264 video from the scrcpy video socket and renders it via AVSampleBufferDisplayLayer.
+//
+//  Frame pipeline:
+//    1. Read 12-byte header: [pts:8 | size:4] (bit 63 of pts = config flag)
+//    2. Config packets → splitAnnexB → SPS/PPS → CMVideoFormatDescription
+//    3. Data packets → annexBtoAVCC → CMBlockBuffer → CMSampleBuffer
+//    4. kCMSampleAttachmentKey_DisplayImmediately = true → bypass PTS scheduling
+//    5. sampleBufferRenderer.enqueue(sb) — AVSampleBufferDisplayLayer manages its queue
+//
+//  Screenshot support: a persistent VTDecompressionSession decodes every frame on a
+//  background VT thread and stores the result in `latestDecodedBuffer` (marked
+//  `nonisolated(unsafe)` since VT writes are sequential and screenshot reads are rare).
+//  captureCurrentFrame() converts the latest CVPixelBuffer to CGImage via a cached
+//  CIContext (Metal GPU context — never recreated per call).
+//
+//  Rotation: processConfigPacket() re-derives videoSize from CMVideoFormatDescription
+//  dimensions on every config packet, including after device rotation.
 //
 
 import Foundation
@@ -8,17 +26,17 @@ import AVFoundation
 import CoreImage
 import CoreMedia
 import VideoToolbox
-import Combine
 import Network
 
 // MARK: - ScrcpyVideoStream
 
 @MainActor
-final class ScrcpyVideoStream: ObservableObject {
+@Observable
+final class ScrcpyVideoStream {
 
     let displayLayer = AVSampleBufferDisplayLayer()
 
-    @Published var videoSize: CGSize = .zero
+    var videoSize: CGSize = .zero
 
     private var connection: NWConnection?
     private var readTask: Task<Void, Never>?
@@ -34,8 +52,12 @@ final class ScrcpyVideoStream: ObservableObject {
     // Decodes every frame in the background and stores the latest CVPixelBuffer.
     // This avoids the deadlock that occurs when creating a VT session on @MainActor on demand.
     private var captureSession: VTDecompressionSession?
-    private var latestDecodedBuffer: CVPixelBuffer?
-    private lazy var ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    /// Written from the VT decompression callback (background thread); read on @MainActor
+    /// for screenshot capture. `nonisolated(unsafe)` opts out of Swift 6 isolation checking —
+    /// safe because VT writes are sequential and screenshot reads are rare, never concurrent.
+    nonisolated(unsafe) private var latestDecodedBuffer: CVPixelBuffer?
+    // @ObservationIgnored required because @Observable macro cannot track lazy stored properties.
+    @ObservationIgnored private lazy var ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
     // Counters for log
     private var configPacketCount = 0
@@ -278,7 +300,7 @@ final class ScrcpyVideoStream: ObservableObject {
         if let sess = captureSession {
             VTDecompressionSessionDecodeFrame(sess, sampleBuffer: sb, flags: [], infoFlagsOut: nil) { [weak self] _, _, imageBuffer, _, _ in
                 guard let pb = imageBuffer else { return }
-                DispatchQueue.main.async { self?.latestDecodedBuffer = pb }
+                self?.latestDecodedBuffer = pb
             }
         }
         enqueuedFrameCount += 1

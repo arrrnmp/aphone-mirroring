@@ -1,13 +1,12 @@
 //
 //  AppLog.swift
-//  Scrcpy SwiftUI
+//  aPhone Mirroring
 //
-//  Simple in-app logger. Call AppLog.shared.log(...) from anywhere.
-//  Keeps the last 500 entries in memory; UI observes via @Published.
+//  Simple in-app logger. Call the free `log()` function from anywhere.
+//  Keeps the last 500 entries in memory; SwiftUI views observe via @Observable.
 //
 
 import Foundation
-import Combine
 import SwiftUI
 
 enum LogLevel: String {
@@ -42,10 +41,11 @@ struct LogEntry: Identifiable {
 }
 
 @MainActor
-final class AppLog: ObservableObject {
+@Observable
+final class AppLog {
     static let shared = AppLog()
 
-    @Published private(set) var entries: [LogEntry] = []
+    private(set) var entries: [LogEntry] = []
 
     private init() {}
 
@@ -60,7 +60,7 @@ final class AppLog: ObservableObject {
     func clear() { entries.removeAll() }
 }
 
-// Convenience free functions
+// Convenience free function — safe to call from any isolation context.
 func log(_ message: String, level: LogLevel = .info) {
     Task { @MainActor in AppLog.shared.log(message, level: level) }
 }

@@ -1,8 +1,16 @@
 //
 //  NWConnectionExtensions.swift
-//  Scrcpy SwiftUI
+//  aPhone Mirroring
 //
-//  Async helpers on NWConnection and Data for the scrcpy protocol.
+//  Async receive helpers for NWConnection and big-endian Data readers.
+//
+//  receiveExactly(_:) is the primary entry point used by the video, audio,
+//  and control read loops. It accumulates partial receives until the full
+//  byte count is satisfied, handling TCP fragmentation transparently.
+//
+//  receiveSome loops to handle rare spurious NWConnection callbacks where
+//  data is nil, isComplete is false, and error is nil simultaneously.
+//  Re-arming avoids spinning receiveExactly on empty Data.
 //
 
 import Foundation

@@ -15,10 +15,10 @@
 
 import Foundation
 import AppKit
-import Combine
 
 @MainActor
-final class BluetoothPairingManager: ObservableObject {
+@Observable
+final class BluetoothPairingManager {
     enum Status: Equatable {
         case idle
         case checking
@@ -28,7 +28,7 @@ final class BluetoothPairingManager: ObservableObject {
         case unavailable(String)
     }
 
-    @Published var status: Status = .idle
+    var status: Status = .idle
 
     // Stored from checkAndPair so startPairing() can use them without params.
     private var storedAdbPath: String = ""

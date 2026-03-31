@@ -22,6 +22,18 @@
 //    pre-allocated scratch buffer, so the lock is held only for the fast Float copy
 //    + index update — minimising contention with the render callback.
 //
+//  Ring buffer data flow:
+//
+//    Writer (network task)             Reader (AVAudio render callback — real-time)
+//    ─────────────────────             ────────────────────────────────────────────
+//    os_unfair_lock_lock()    ──►      os_unfair_lock_trylock()
+//    s16le→Float32 (scratch)           if locked → output silence (never blocks RT)
+//    Float copy + update index         else → copy frames + update read index
+//    os_unfair_lock_unlock()           os_unfair_lock_unlock()
+//
+//    Overflow → oldest frames flushed (tail of payload kept, most recent wins)
+//    Underrun → silence filled
+//
 //  scrcpy raw audio format (from AudioConfig.java):
 //    • 12-byte stream header  (codec_id:4 + reserved:8)
 //    • Repeated frames: [pts:8 | size:4] + payload
@@ -246,8 +258,10 @@ final class ScrcpyAudioStream {
             object: eng,
             queue: .main
         ) { [weak self] _ in
+            // Note: no need to check `self.engine === eng` — the observer was registered
+            // with `object: eng`, so it only fires for this specific engine instance.
             Task { @MainActor [weak self] in
-                guard let self, self.engine === eng else { return }
+                guard let self else { return }
                 do {
                     try self.engine.start()
                     log("Audio engine restarted after configuration change", level: .ok)

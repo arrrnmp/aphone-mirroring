@@ -50,9 +50,12 @@ struct BridgeMessage: Identifiable, Codable {
 
     var id: Int64 { messageId }
 
+    private static let timeFmt: DateFormatter = {
+        let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none; return f
+    }()
+
     var timeLabel: String {
-        static let fmt: DateFormatter = { let f = DateFormatter(); f.timeStyle = .short; f.dateStyle = .none; return f }()
-        return fmt.string(from: Date(timeIntervalSince1970: timestamp / 1000.0))
+        Self.timeFmt.string(from: Date(timeIntervalSince1970: timestamp / 1000.0))
     }
 }
 
@@ -199,6 +202,13 @@ struct BridgeCallState: Equatable {
 // MARK: - BridgeRelativeDate
 
 enum BridgeRelativeDate {
+    private static let weekdayFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateFormat = "EEE"; return f
+    }()
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter(); f.dateStyle = .short; f.timeStyle = .none; return f
+    }()
+
     static func label(from epochSeconds: Double) -> String {
         let date = Date(timeIntervalSince1970: epochSeconds)
         let interval = Date().timeIntervalSince(date)
@@ -209,9 +219,6 @@ enum BridgeRelativeDate {
 
         let cal = Calendar.current
         if cal.isDateInYesterday(date) { return "Yesterday" }
-
-        static let weekdayFmt: DateFormatter = { let f = DateFormatter(); f.dateFormat = "EEE"; return f }()
-        static let dateFmt: DateFormatter    = { let f = DateFormatter(); f.dateStyle = .short; f.timeStyle = .none; return f }()
 
         if interval < 7 * 86400 { return weekdayFmt.string(from: date) }
         return dateFmt.string(from: date)

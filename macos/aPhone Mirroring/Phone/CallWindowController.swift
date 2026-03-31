@@ -75,7 +75,7 @@ final class CallWindowController {
 struct CallView: View {
 
     let call: BridgeCallState
-    @ObservedObject var bridge: DataBridgeClient
+    let bridge: DataBridgeClient
 
     @State private var isMuted = false
     @State private var elapsedSeconds = 0

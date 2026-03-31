@@ -2,13 +2,26 @@
 //  DataBridgeClient.swift
 //  aPhone Mirroring
 //
-//  Connects to the Android DataBridgeService over a local TCP port forwarded via ADB.
-//  Fetches real SMS threads, messages, call log, and photos.
-//  Delivers Android notifications to macOS Notification Center.
+//  TCP client for the Android DataBridgeService (port 27184, forwarded via `adb forward`).
+//  Provides SMS threads, messages, call log, photos, contacts, active-call state, and
+//  real-time push notifications from the Android device to the macOS UI.
+//
+//  Transport: newline-delimited JSON over TCP.
+//  Reconnect backoff:
+//
+//    connect() → success → readLoop running
+//                failure → wait 2 s → retry → ... → cap at 30 s
+//    On disconnect during readLoop → retryTask starts from 2 s again
+//
+//  All published state is @MainActor. The TCP read loop runs on a detached Task to
+//  avoid blocking the main actor during I/O. Server-initiated push events arrive via
+//  the read loop and are dispatched to @MainActor for state updates.
+//
+//  DataBridgeClient.shared (nonisolated unsafe) is written once on init and used by
+//  the AppDelegate notification action handler — safe because it is never reassigned.
 //
 
 import Foundation
-import Combine
 import Network
 import AppKit
 import UserNotifications
@@ -16,20 +29,21 @@ import UserNotifications
 // MARK: - DataBridgeClient
 
 @MainActor
-final class DataBridgeClient: ObservableObject {
+@Observable
+final class DataBridgeClient {
 
-    @Published var threads:     [BridgeThread]           = []
-    @Published var messages:    [Int64: [BridgeMessage]] = [:]
-    @Published var calls:       [BridgeCall]             = []
-    @Published var photos:      [BridgePhoto]            = []
-    @Published var contacts:    [BridgeContact]          = []
-    @Published var activeCall:      BridgeCallState?      = nil
-    @Published var callAudioError:  String?               = nil  // "hfp_unavailable" etc.
+    var threads:     [BridgeThread]           = []
+    var messages:    [Int64: [BridgeMessage]] = [:]
+    var calls:       [BridgeCall]             = []
+    var photos:      [BridgePhoto]            = []
+    var contacts:    [BridgeContact]          = []
+    var activeCall:      BridgeCallState?      = nil
+    var callAudioError:  String?               = nil  // "hfp_unavailable" etc.
     /// Keyed by phone number string; nil means not yet loaded for that number.
-    @Published var contactApps: [String: [BridgeContactApp]] = [:]
-    @Published var isConnected  = false
-    @Published var isLoading    = false
-    @Published var photosHasMore = true   // false once Android returns a partial page
+    var contactApps: [String: [BridgeContactApp]] = [:]
+    var isConnected  = false
+    var isLoading    = false
+    var photosHasMore = true   // false once Android returns a partial page
 
     private var connection:       NWConnection?
     private var readTask:         Task<Void, Never>?
