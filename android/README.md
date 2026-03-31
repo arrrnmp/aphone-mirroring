@@ -79,7 +79,7 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 ## Architecture
 
-See [CLAUDE.md](CLAUDE.md) for a detailed breakdown of every component, the data bridge protocol, state management, and threading model.
+See [CLAUDE.md](../CLAUDE.md) for a detailed breakdown of every component, the data bridge protocol, state management, and threading model.
 
 ---
 
