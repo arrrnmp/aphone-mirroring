@@ -25,7 +25,7 @@ Built on the [scrcpy](https://github.com/Genymobile/scrcpy) protocol (v3.3.4) fo
 - **Active Call UI**: Floating Liquid Glass call window with mute, end, and audio-routing controls
 
 ### Bluetooth & Audio
-- Automatic Bluetooth pairing detection via IOBluetooth (HFP for call audio)
+- Automatic Bluetooth pairing detection via `system_profiler` (HFP for call audio; IOBluetooth is not used — removed on macOS 26)
 - Prompts user to pair if not already paired; polls for completion
 - Route call audio between Mac and phone during active calls
 
@@ -86,7 +86,7 @@ xcodebuild -scheme "Scrcpy SwiftUI" -configuration Debug -destination 'platform=
 ## Troubleshooting
 
 - **Device not detected**: Run `adb kill-server && adb start-server`, reconnect the device.
-- **No audio**: Ensure the device allows audio over USB; check that no other app is holding the audio session.
+- **No audio**: Ensure the device allows audio over USB. The audio engine restarts automatically if you switch output devices (headphones, Bluetooth speakers, etc.) while mirroring. If audio still doesn't recover, disconnect and reconnect the device.
 - **Data bridge not connecting**: Make sure the PhoneConnect companion app is running on Android and USB is connected. The bridge auto-retries with exponential backoff.
 - **Bluetooth pairing fails**: Make the Android device discoverable manually before tapping "Pair Now."
 

@@ -36,9 +36,9 @@ All source files are in `aPhone Mirroring/aPhone MIrroring/`.
 |------|------|
 | `ScrcpyManager.swift` | Main orchestrator (`@MainActor ObservableObject`). Owns connection lifecycle, ADB device discovery, TCP listener, handshake, battery polling, menu bar status icon, file drag-and-drop push, and screenshot capture. Publishes `screenshotFlash: ScreenshotFlash?` (set with `withAnimation`; auto-cleared after 3.5 s). |
 | `ScrcpyVideoStream.swift` | H.264 decoder. Reads 12-byte frame headers, converts Annex B → AVCC, enqueues `CMSampleBuffer` to `AVSampleBufferDisplayLayer`. Publishes `videoSize` (updated from SPS on every config packet, including rotation). Maintains a persistent `VTDecompressionSession` that decodes every frame in the background and stores the latest `CVPixelBuffer` for screenshot capture. |
-| `ScrcpyAudioStream.swift` | PCM audio processor. Reads raw s16le stereo 48 kHz frames, converts to Float32 planar, feeds an `AVAudioSourceNode` pull-model render callback via a lock-protected SPSC ring buffer (`AudioRingBuffer`). This prevents inter-buffer silence gaps that caused crackling with the old `scheduleBuffer` push model. |
+| `ScrcpyAudioStream.swift` | PCM audio processor. Reads raw s16le stereo 48 kHz frames, converts to Float32 planar, feeds an `AVAudioSourceNode` pull-model render callback via a lock-protected SPSC ring buffer (`AudioRingBuffer`). Real-time safe: render callback uses `os_unfair_lock_trylock` (never blocks); s16le→Float32 conversion happens outside the lock into pre-allocated scratch buffers to minimise lock hold time. Observes `AVAudioEngineConfigurationChange` to restart the engine when the audio device changes (headphones, Bluetooth, etc.). |
 | `ScrcpyControlSocket.swift` | Input protocol. Encodes keyboard/mouse/touch/scroll/rotation as scrcpy v3 binary messages (big-endian). Bidirectional clipboard sync. |
-| `ContentView.swift` | Root split-panel layout (`PhonePanelView` left + `ContentPanelView` right). `PhonePanelView` owns phone viewport, hover-reveal title bar, glass control pills, log panel, screenshot flash overlay, and the pop-out flow. `ContentPanelView` hosts a top-mounted Liquid Glass segmented tab bar (Messages / Photos / Calls) with `AuthManager`-gated content. Also contains `PopoutCoordinator`, `PopoutView`, `ToolbarHoverArea`, `TrafficLightController`, `ScreenshotFlashView`, `PanelResizeDivider`, and all tab sub-views. |
+| `ContentView.swift` | Root split-panel layout (`PhonePanelView` left + `ContentPanelView` right). `PhonePanelView` owns phone viewport, hover-reveal title bar, glass control pills, log panel, screenshot flash overlay, and the pop-out flow. `ContentPanelView` hosts a top-mounted Liquid Glass segmented tab bar (Messages / Photos / Calls) with `AuthManager`-gated content. Also contains `PopoutCoordinator`, `PopoutView`, `ToolbarHoverArea`, `TrafficLightController`, `ScreenshotFlashView`, `PanelResizeDivider`, `HardwareControlsBar`, and all tab sub-views. |
 | `ToolbarButton.swift` | Shared button component with two styles: `.glass` (36×36, interactive glass circle, used in title bar and hover toolbars) and `.panel` (36×36, plain, used in `ControlPanelView`). Replaces the duplicated `barButton`/`popBtn`/`panelButton` private helpers that previously existed in each view. |
 | `AuthManager.swift` | `@Observable` class that gates access to the right-panel tabs via biometrics/password. Locks after 2 min background or 2 min inactivity. |
 | `VideoDisplayView.swift` | `NSViewRepresentable` bridging SwiftUI to `AVSampleBufferDisplayLayer`. Captures all mouse/keyboard/scroll events, supports trackpad gesture simulation, and drag-and-drop file handling. |
@@ -47,7 +47,7 @@ All source files are in `aPhone Mirroring/aPhone MIrroring/`.
 | `AppLog.swift` | Singleton logger, max 500 entries, displayed as overlay in `PhonePanelView`. |
 | `NWConnectionExtensions.swift` | Protocol helpers: async `receiveExactly()` on `NWConnection`, big-endian `Data` readers. |
 | `DataBridgeClient.swift` | TCP client connecting to the Android `DataBridgeService` companion app on port 27184 (forwarded via `adb forward`). Fetches real SMS threads, messages, call log, photos, and contacts. Delivers Android push notifications to macOS Notification Center with actionable reply support. Handles `activeCall` state and `callAudioError`. Auto-retries with exponential backoff on disconnect. |
-| `DataBridgeModels.swift` | Swift models mirroring the Android bridge models: `BridgeThread`, `BridgeMessage`, `BridgeCall`, `BridgePhoto`, `BridgeContact`, `BridgeContactApp`, `BridgeCallState`, `BridgeRelativeDate`. All `Codable` for JSON decode over the TCP bridge. |
+| `DataBridgeModels.swift` | Swift models mirroring the Android bridge models: `BridgeThread`, `BridgeMessage`, `BridgeCall`, `BridgePhoto`, `BridgeContact`, `BridgeContactApp`, `BridgeCallState`, `BridgeRelativeDate`. All `Codable` for JSON decode over the TCP bridge. `DateFormatter` instances in `BridgeMessage.timeLabel` and `BridgeRelativeDate.label` are cached as `static let` locals — do not recreate them per call. |
 | `BluetoothPairingManager.swift` | Detects whether the Android device is paired via Classic Bluetooth (required for HFP call-audio routing). Reads the phone's BT address via ADB, then queries `system_profiler SPBluetoothDataType -json` to check if that address appears in macOS's paired-device list. Pairing is initiated by making the phone discoverable via ADB and opening macOS Bluetooth System Settings (`x-apple.systempreferences:com.apple.BluetoothSettings`) for the user to complete. Polls `system_profiler` every 2 s (60 s timeout). **Does not use `IOBluetooth`** — that framework is removed on macOS 26. |
 | `CallWindowController.swift` | Singleton that manages a floating borderless `NSWindow` shown during active calls. Hosts `CallView` — a Liquid Glass card with contact name, call status, elapsed timer, and glass circle action buttons (Mute, End, Mac Audio, Phone Audio). Positioned top-right of the main screen with a 12 pt margin. |
 
@@ -222,6 +222,11 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
   - Phone numbers deduplicated by digits-only comparison before rendering.
   - Email rows are tappable — open `mailto:` URL in default Mail app.
 
+**`HardwareControlsBar`** (private struct in `ContentView.swift`):
+- Shared hardware control bar used by both `PhonePanelView`'s inline controls section and `PopoutView`'s fullscreen bottom bar.
+- Takes a single `controlSocket: ScrcpyControlSocket` parameter. Renders three glass-pill groups: Volume (Up/Down/Mute), Navigation (Back/Home/Recents), System (Power/Rotate).
+- Do not duplicate this inline — use `HardwareControlsBar(controlSocket:)` at both call sites.
+
 **Control Panel** (floating side window alongside the popout):
 - Borderless `NSWindow` hosting `ControlPanelView` SwiftUI view
 - 9 buttons: Back, Home, Recents, Volume Up, Volume Down, Mute, Power, Rotate
@@ -267,19 +272,22 @@ The app window uses `.hiddenTitleBar` style (set via `WindowGroup.windowStyle`) 
 **Battery status** (in `ScrcpyManager`):
 - Polled every 60s from `dumpsys battery`, parsed for `level:` and `status:` (2=charging, 5=full)
 - Displayed as macOS menu bar status item with battery icon + level + ⚡ charging indicator
+- Change guard skips `@Published` assignments (and status bar rebuild) when level and charging state are unchanged — do not remove it
 
 **Screenshot** (in `ScrcpyManager` + `ScrcpyVideoStream`):
 - Triggered via `camera` button in main panel title bar (when connected) or popout hover toolbar
 - `ScrcpyVideoStream` keeps a persistent `VTDecompressionSession` (`captureSession`) that decodes every incoming frame on a background VT thread and stores the result in `latestDecodedBuffer` via `DispatchQueue.main.async`. This avoids the deadlock that occurs when creating a VT session on `@MainActor` and blocking with `VTDecompressionSessionWaitForAsynchronousFrames` (the output handler can't be delivered while main is blocked).
-- `captureCurrentFrame()` converts `latestDecodedBuffer` (CVPixelBuffer → CIImage → CGImage). Returns nil if no frame has been decoded yet.
+- `captureCurrentFrame()` converts `latestDecodedBuffer` (CVPixelBuffer → CIImage → CGImage) using a `lazy var ciContext` (Metal GPU context). Returns nil if no frame has been decoded yet. Do not create a new `CIContext` per call — it is extremely expensive.
 - `ScrcpyManager.takeScreenshot()`: captures frame, writes PNG to Desktop as `aPhone Screenshot yyyy-MM-dd at HH.mm.ss.png`, plays `/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif` (fallback: `NSSound(named: "Pop")`), sets `screenshotFlash` with `withAnimation`, clears it after 3.5 s.
 - `ScreenshotFlashView` (private in `ContentView.swift`): thumbnail overlay at `.bottomTrailing` of the phone viewport; springs in via `onAppear`; clicking opens the file in the default viewer (`NSWorkspace.shared.open`). Shown in both main panel (`!viewportIsPopped`) and popout.
 - `CGWindowListCreateImage` is **unavailable** in the macOS 26 SDK — do not attempt to use it.
 
 **Audio** (in `ScrcpyAudioStream`):
 - Pull-model: `AVAudioSourceNode` render callback drains `AudioRingBuffer` on every engine tick — no silence gaps on USB jitter.
-- `AudioRingBuffer`: SPSC ring buffer, 2 s capacity (96 000 frames @ 48 kHz), `os_unfair_lock`-protected. Converts s16le interleaved → Float32 non-interleaved on write; fills silence on underrun.
+- `AudioRingBuffer`: SPSC ring buffer, 2 s capacity (96 000 frames @ 48 kHz). Real-time safe: render callback uses `os_unfair_lock_trylock` — if the writer holds the lock it outputs silence for that render period (~10 ms) rather than blocking the real-time thread (priority inversion). s16le→Float32 conversion is performed outside the lock into pre-allocated `tempL`/`tempR` scratch buffers; the lock is held only for the fast Float copy + index update. On overflow, the LATEST (tail) frames of the payload are kept; oldest frames are flushed. Fills silence on underrun.
+- `AVAudioEngineConfigurationChange` observer in `buildEngine()` restarts the engine whenever the audio hardware changes (headphones connected/disconnected, Bluetooth device switch, display audio on HDMI). Without this, the engine stops permanently on device change. Observer token stored in `engineConfigObserver`; removed in `stop()` before the engine is torn down.
 - Do **not** revert to `scheduleBuffer`/`AVAudioPlayerNode` — that approach inserts silence whenever a buffer hasn't arrived yet, causing audible crackling.
+- Do **not** replace `trylock` with `lock` in the render callback — blocking the real-time audio thread causes priority inversion and crackling under USB burst delivery.
 
 **Debug log panel** (in `PhonePanelView`):
 - Slides up from the bottom of the phone panel.
